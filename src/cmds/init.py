@@ -1,68 +1,35 @@
-from src import __version__
 import os
 import shutil
-
-from argparse import Namespace, ArgumentParser
-from typing import List, Dict, Any, Tuple
-
-from src.util.default_root import DEFAULT_ROOT_PATH
-from src.util.keychain import Keychain
-
-from src.util.config import unflatten_properties
 from pathlib import Path
-from src.consensus.coinbase import create_puzzlehash_for_pk
-from src.util.ints import uint32
+from typing import Any, Dict, List, Tuple
 
-from src.util.config import (
-    create_default_chia_config,
-    load_config,
-    save_config,
-    initial_config_file,
-)
-from src.util.path import mkdir
+import click
 import yaml
 
-from src.ssl.create_ssl import get_chia_ca_crt_key, generate_ca_signed_cert, make_ca_cert
-from src.wallet.derive_keys import master_sk_to_wallet_sk, master_sk_to_pool_sk
+from src import __version__
+from src.consensus.coinbase import create_puzzlehash_for_pk
+from src.ssl.create_ssl import generate_ca_signed_cert, get_chia_ca_crt_key, make_ca_cert
 from src.util.bech32m import encode_puzzle_hash
-
+from src.util.config import (
+    create_default_chia_config,
+    initial_config_file,
+    load_config,
+    save_config,
+    unflatten_properties,
+)
+from src.util.default_root import DEFAULT_ROOT_PATH
+from src.util.ints import uint32
+from src.util.keychain import Keychain
+from src.util.path import mkdir
+from src.wallet.derive_keys import master_sk_to_pool_sk, master_sk_to_wallet_sk
 
 private_node_names = {"full_node", "wallet", "farmer", "harvester", "timelord", "daemon"}
 public_node_names = {"full_node", "wallet", "farmer", "introducer", "timelord"}
 
 
-def help_message():
-    print("usage: chia init")
-    print(
-        """
-        chia init (migrate previous version configuration to current)
-        chia init -c [directory] (creates new TLS certificates signed by your CA in [directory])
-            Follow these steps to create new certifcates for a remote harvester:
-            - Make a copy of your Farming Machine CA directory: ~/.chia/[version]/config/ssl/ca
-            - Shut down all chia daemon processes with `chia stop all -d`
-            - Run `chia init -c [directory]` on your remote harvester,
-              where [directory] is the the copy of your Farming Machine CA directory
-            - Get more details on remote harvester on Chia wiki:
-              https://github.com/Chia-Network/chia-blockchain/wiki/Farming-on-many-machines
-        """
-    )
-
-
-def make_parser(parser):
-    parser.add_argument(
-        "-c",
-        "--create_certs",
-        help="Create new SSL certificates based on CA in [directory]",
-        type=Path,
-        default=None,
-    )
-    parser.set_defaults(function=init)
-    parser.print_help = lambda self=parser: help_message()
-
-
 def dict_add_new_default(updated: Dict, default: Dict, do_not_migrate_keys: Dict[str, Any]):
     for k in do_not_migrate_keys:
-        if k in updated:
+        if k in updated and do_not_migrate_keys[k] == "":
             updated.pop(k)
     for k, v in default.items():
         ignore = False
@@ -94,12 +61,14 @@ def check_keys(new_root):
     stop_searching_for_farmer = "xch_target_address" not in config["farmer"]
     stop_searching_for_pool = "xch_target_address" not in config["pool"]
     number_of_ph_to_search = 500
+    selected = config["selected_network"]
+    prefix = config["network_overrides"]["config"][selected]["address_prefix"]
     for i in range(number_of_ph_to_search):
         if stop_searching_for_farmer and stop_searching_for_pool and i > 0:
             break
         for sk, _ in all_sks:
             all_targets.append(
-                encode_puzzle_hash(create_puzzlehash_for_pk(master_sk_to_wallet_sk(sk, uint32(i)).get_g1()))
+                encode_puzzle_hash(create_puzzlehash_for_pk(master_sk_to_wallet_sk(sk, uint32(i)).get_g1()), prefix)
             )
             if all_targets[-1] == config["farmer"].get("xch_target_address"):
                 stop_searching_for_farmer = True
@@ -164,7 +133,7 @@ def migrate_from(
         print("same as new path, exiting")
         return 1
     if not old_root.is_dir():
-        print(f"{old_root} not found - this is ok if you did not install this version.")
+        print(f"{old_root} not found - this is ok if you did not install this version")
         return 0
     print(f"\n{old_root} found")
     print(f"Copying files from {old_root} to {new_root}\n")
@@ -255,24 +224,24 @@ def generate_ssl_for_nodes(ssl_dir: Path, ca_crt: bytes, ca_key: bytes, private:
         generate_ca_signed_cert(ca_crt, ca_key, crt_path, key_path)
 
 
-def init(args: Namespace, parser: ArgumentParser):
-    if args.create_certs is not None:
-        if args.root_path.exists():
-            if os.path.isdir(args.create_certs):
-                ca_dir: Path = args.root_path / "config/ssl/ca"
+def init(create_certs: Path, root_path: Path):
+    if create_certs is not None:
+        if root_path.exists():
+            if os.path.isdir(create_certs):
+                ca_dir: Path = root_path / "config/ssl/ca"
                 if ca_dir.exists():
                     print(f"Deleting your OLD CA in {ca_dir}")
                     shutil.rmtree(ca_dir)
-                print(f"Copying your CA from {args.create_certs} to {ca_dir}")
-                copy_files_rec(args.create_certs, ca_dir)
-                create_all_ssl(args.root_path)
+                print(f"Copying your CA from {create_certs} to {ca_dir}")
+                copy_files_rec(create_certs, ca_dir)
+                create_all_ssl(root_path)
             else:
-                print(f"** Directory {args.create_certs} does not exist **")
+                print(f"** Directory {create_certs} does not exist **")
         else:
-            print(f"** {args.root_path} does not exist **")
-            print("** please run `chia init` to migrate or create new config files **")
+            print(f"** {root_path} does not exist **")
+            print("** Please run `chia init` to migrate or create new config files **")
     else:
-        return chia_init(args.root_path)
+        return chia_init(root_path)
 
 
 def chia_version_number() -> Tuple[str, str, str, str]:
@@ -339,7 +308,7 @@ def chia_init(root_path: Path):
         print(
             f"warning, your CHIA_ROOT is set to {os.environ['CHIA_ROOT']}. "
             f"Please unset the environment variable and run chia init again\n"
-            f"or manually migrate config.yaml."
+            f"or manually migrate config.yaml"
         )
 
     print(f"Chia directory {root_path}")
@@ -395,6 +364,8 @@ def chia_init(root_path: Path):
         "timelord.selected_network",
         "farmer.xch_target_address",
         "pool.xch_target_address",
+        "ALERTS_URL",
+        "CHIA_ALERTS_PUBKEY",
     ]
 
     # These are the files that will be migrated
@@ -406,25 +377,10 @@ def chia_init(root_path: Path):
 
     manifest = MANIFEST
 
-    # Migrates rc1
-    rc1_path = Path(os.path.expanduser("~/.chia/1.0rc1"))
-    if rc1_path.is_dir():
-        r = migrate_from(rc1_path, root_path, manifest, DO_NOT_MIGRATE_SETTINGS)
-        if r:
-            check_keys(root_path)
-            return 0
-
-    # Migrates windows beta27
-    b27_windows_path = Path(os.path.expanduser("~/.chia/beta-0.1.27"))
-    if b27_windows_path.is_dir():
-        r = migrate_from(b27_windows_path, root_path, manifest, DO_NOT_MIGRATE_SETTINGS)
-        if r:
-            check_keys(root_path)
-            return 0
-
-    # Version 19 is the first version that used the bech32m addresses
-    for version_number in range(27, 18, -1):
-        old_path = Path(os.path.expanduser("~/.chia/beta-1.0b%s" % version_number))
+    # Starting with RC2 is the first version that used the bech32m addresses
+    # range current version and 0=version 1
+    for version_number in range(chia_minor_release_number() - 1, 2, -1):
+        old_path = Path(os.path.expanduser("~/.chia/1.0rc%s" % version_number))
         print(f"Checking {old_path}")
         # This is reached if the user has updated the application, and therefore a new configuration
         # folder must be used. First we migrate the config fies, and then we migrate the private keys.
@@ -440,6 +396,31 @@ def chia_init(root_path: Path):
         print("To see your keys, run 'chia keys show'")
 
     return 0
+
+
+@click.command("init", short_help="Create or migrate the configuration")
+@click.option(
+    "--create-certs",
+    "-c",
+    default=None,
+    help="Create new SSL certificates based on CA in [directory]",
+    type=click.Path(),
+)
+@click.pass_context
+def init_cmd(ctx: click.Context, create_certs: str):
+    """
+    Create a new configuration or migrate from previous versions to current
+
+    \b
+    Follow these steps to create new certifcates for a remote harvester:
+    - Make a copy of your Farming Machine CA directory: ~/.chia/[version]/config/ssl/ca
+    - Shut down all chia daemon processes with `chia stop all -d`
+    - Run `chia init -c [directory]` on your remote harvester,
+      where [directory] is the the copy of your Farming Machine CA directory
+    - Get more details on remote harvester on Chia wiki:
+      https://github.com/Chia-Network/chia-blockchain/wiki/Farming-on-many-machines
+    """
+    init(Path(create_certs) if create_certs is not None else None, ctx.obj["root_path"])
 
 
 if __name__ == "__main__":

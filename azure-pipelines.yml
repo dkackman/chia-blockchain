@@ -36,8 +36,6 @@ steps:
       keychain: temp
       deleteCert: true
 
-  #  since we're installing miniupnpc below,
-  #  only cbor2 will end up in wheels/
   - script: |
       python -m venv venv
       ln -s venv/bin/activate .
@@ -45,13 +43,13 @@ steps:
       python -m pip install --upgrade pip
       pip install wheel pep517 setuptools_scm
       node -v
-      pip install -i https://download.chia.net/simple/ miniupnpc==2.1
+      pip install -i https://pypi.chia.net/simple/ miniupnpc==2.1
     displayName: "Install dependencies"
 
   - script: |
       . ./activate
       clang --version
-      pip wheel --use-pep517 --only-binary cbor2 --extra-index-url https://download.chia.net/simple/ --wheel-dir=wheels .
+      pip wheel --use-pep517 --extra-index-url https://pypi.chia.net/simple/ --wheel-dir=wheels .
       pip install --no-index --find-links=./wheels/ chia-blockchain
     displayName: "Build and install wheels"
 
@@ -60,16 +58,6 @@ steps:
       versionSpec: '12.x'
     displayName: "Setup Node 12.x"
 
-  - script: |
-      . ./activate
-      git submodule update --init --recursive
-      cd ./chia-blockchain-gui
-      npm install
-      npm audit fix
-      npm run locale:extract
-      npm run locale:compile
-    displayName: "Build Electron/React UI"
-
   - bash: |
       . ./activate
       APPLE_NOTARIZE_USERNAME="$(APPLE_NOTARIZE_USERNAME)"
@@ -77,6 +65,7 @@ steps:
       APPLE_NOTARIZE_PASSWORD="$(APPLE_NOTARIZE_PASSWORD)"
       export APPLE_NOTARIZE_PASSWORD
       if [ "$(APPLE_NOTARIZE_PASSWORD)" ]; then NOTARIZE="true"; export NOTARIZE; fi
+      git submodule update --init --recursive
       cd build_scripts || exit
       sh build_macos.sh
     displayName: "Build DMG with build_scripts/build_macos.sh"

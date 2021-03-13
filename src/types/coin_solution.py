@@ -1,12 +1,12 @@
-from typing import List
-
 from dataclasses import dataclass
+from typing import List
 
 from src.types.blockchain_format.coin import Coin
 from src.types.blockchain_format.program import Program
-from .announcement import Announcement
 from src.util.chain_utils import additions_for_solution, announcements_for_solution
 from src.util.streamable import Streamable, streamable
+
+from .announcement import Announcement
 
 
 @dataclass(frozen=True)
@@ -19,10 +19,11 @@ class CoinSolution(Streamable):
     """
 
     coin: Coin
+    puzzle_reveal: Program
     solution: Program
 
     def additions(self) -> List[Coin]:
-        return additions_for_solution(self.coin.name(), self.solution)
+        return additions_for_solution(self.coin.name(), self.puzzle_reveal, self.solution)
 
     def announcements(self) -> List[Announcement]:
-        return announcements_for_solution(self.coin.name(), self.solution)
+        return announcements_for_solution(self.coin.name(), self.puzzle_reveal, self.solution)

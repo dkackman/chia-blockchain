@@ -1,15 +1,31 @@
 import pickle
+from os import path
+
 import aiosqlite
 import pytest
 from typing import List
 from pathlib import Path
-from src.full_node.block_store import BlockStore
+
+from src.consensus.constants import ConsensusConstants
+
 from src.consensus.blockchain import Blockchain
+from src.full_node.block_store import BlockStore
 from src.full_node.coin_store import CoinStore
 from src.types.full_block import FullBlock
 from src.util.path import mkdir
-from tests.setup_nodes import test_constants, bt
-from os import path
+from tests.setup_nodes import bt, test_constants
+
+
+async def create_blockchain(constants: ConsensusConstants):
+    db_path = Path("blockchain_test.db")
+    if db_path.exists():
+        db_path.unlink()
+    connection = await aiosqlite.connect(db_path)
+    coin_store = await CoinStore.create(connection)
+    store = await BlockStore.create(connection)
+    bc1 = await Blockchain.create(coin_store, store, constants)
+    assert bc1.get_peak() is None
+    return bc1, connection, db_path
 
 
 @pytest.fixture(scope="function")
@@ -17,15 +33,7 @@ async def empty_blockchain():
     """
     Provides a list of 10 valid blocks, as well as a blockchain with 9 blocks added to it.
     """
-    db_path = Path("blockchain_test.db")
-    if db_path.exists():
-        db_path.unlink()
-    connection = await aiosqlite.connect(db_path)
-    coin_store = await CoinStore.create(connection)
-    store = await BlockStore.create(connection)
-    bc1 = await Blockchain.create(coin_store, store, test_constants)
-    assert bc1.get_peak() is None
-
+    bc1, connection, db_path = await create_blockchain(test_constants)
     yield bc1
 
     await connection.close()
@@ -33,7 +41,7 @@ async def empty_blockchain():
     db_path.unlink()
 
 
-block_format_version = "b28_1"
+block_format_version = "rc4"
 
 
 @pytest.fixture(scope="session")
@@ -47,6 +55,13 @@ async def default_1000_blocks():
 
 
 @pytest.fixture(scope="session")
+async def pre_genesis_empty_slots_1000_blocks():
+    return persistent_blocks(
+        1000, f"pre_genesis_empty_slots_1000_blocks{block_format_version}.db", seed=b"alternate2", empty_sub_slots=1
+    )
+
+
+@pytest.fixture(scope="session")
 async def default_10000_blocks():
     return persistent_blocks(10000, f"test_blocks_10000_{block_format_version}.db")
 
@@ -56,7 +71,18 @@ async def default_20000_blocks():
     return persistent_blocks(20000, f"test_blocks_20000_{block_format_version}.db")
 
 
-def persistent_blocks(num_of_blocks: int, db_name: str, seed: bytes = b""):
+@pytest.fixture(scope="session")
+async def default_10000_blocks_compact():
+    return persistent_blocks(10000, f"test_blocks_10000_compact_{block_format_version}.db", normalized_to_identity=True)
+
+
+def persistent_blocks(
+    num_of_blocks: int,
+    db_name: str,
+    seed: bytes = b"",
+    empty_sub_slots=0,
+    normalized_to_identity: bool = False,
+):
     # try loading from disc, if not create new blocks.db file
     # TODO hash fixtures.py and blocktool.py, add to path, delete if the files changed
     block_path_dir = Path("~/.chia/blocks").expanduser()
@@ -78,12 +104,19 @@ def persistent_blocks(num_of_blocks: int, db_name: str, seed: bytes = b""):
         except EOFError:
             print("\n error reading db file")
 
-    return new_test_db(file_path, num_of_blocks, seed)
+    return new_test_db(file_path, num_of_blocks, seed, empty_sub_slots, normalized_to_identity)
 
 
-def new_test_db(path: Path, num_of_blocks: int, seed: bytes):
-    print(f"create {path} with {num_of_blocks} blocks")
-    blocks: List[FullBlock] = bt.get_consecutive_blocks(num_of_blocks, seed=seed)
+def new_test_db(
+    path: Path, num_of_blocks: int, seed: bytes, empty_sub_slots: int, normalized_to_identity: bool = False
+):
+    print(f"create {path} with {num_of_blocks} blocks with ")
+    blocks: List[FullBlock] = bt.get_consecutive_blocks(
+        num_of_blocks,
+        seed=seed,
+        skip_slots=empty_sub_slots,
+        normalized_to_identity=normalized_to_identity,
+    )
     block_bytes_list: List[bytes] = []
     for block in blocks:
         block_bytes_list.append(bytes(block))

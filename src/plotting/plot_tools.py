@@ -1,18 +1,18 @@
-from typing import List, Dict, Optional, Tuple, Set, Union
-from pathlib import Path
-from blspy import PrivateKey, G1Element
-from chiapos import DiskProver
-from dataclasses import dataclass
-import time
 import logging
+import time
 import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from src.consensus.pos_quality import _expected_plot_size, UI_ACTUAL_SPACE_CONSTANT_FACTOR
+from blspy import G1Element, PrivateKey
+from chiapos import DiskProver
+
+from src.consensus.pos_quality import UI_ACTUAL_SPACE_CONSTANT_FACTOR, _expected_plot_size
 from src.types.blockchain_format.proof_of_space import ProofOfSpace
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.util.config import load_config, save_config
 from src.wallet.derive_keys import master_sk_to_local_sk
-
 
 log = logging.getLogger(__name__)
 
@@ -22,9 +22,7 @@ class PlotInfo:
     prover: DiskProver
     pool_public_key: Optional[G1Element]
     pool_contract_puzzle_hash: Optional[bytes32]
-    farmer_public_key: G1Element
     plot_public_key: G1Element
-    local_sk: PrivateKey
     file_size: int
     time_modified: float
 
@@ -45,7 +43,7 @@ def _get_filenames(directory: Path) -> List[Path]:
                 if child.suffix == ".plot" and not child.name.startswith("._"):
                     all_files.append(child)
             else:
-                log.info(f"Not checking subdirectory {child} - no .plot files found")
+                log.info(f"Not checking subdirectory {child}, subdirectories not added by default")
     except Exception as e:
         log.warning(f"Error reading directory {directory} {e}")
     return all_files
@@ -238,9 +236,7 @@ def load_plots(
                     prover,
                     pool_public_key,
                     pool_contract_puzzle_hash,
-                    farmer_public_key,
                     plot_public_key,
-                    local_sk,
                     stat_info.st_size,
                     stat_info.st_mtime,
                 )

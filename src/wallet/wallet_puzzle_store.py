@@ -1,12 +1,14 @@
 import asyncio
-from blspy import G1Element
-from typing import Set, Tuple, Optional, List
-import aiosqlite
 import logging
+from typing import List, Optional, Set, Tuple
+
+import aiosqlite
+from blspy import G1Element
+
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.util.ints import uint32
-from src.wallet.util.wallet_types import WalletType
 from src.wallet.derivation_record import DerivationRecord
+from src.wallet.util.wallet_types import WalletType
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +295,23 @@ class WalletPuzzleStore:
 
         if row is not None and row[0] is not None:
             return uint32(row[0])
+
+        return None
+
+    async def get_current_derivation_record_for_wallet(self, wallet_id: uint32) -> Optional[DerivationRecord]:
+        """
+        Returns the current derivation record by derivation_index.
+        """
+
+        cursor = await self.db_connection.execute(
+            f"SELECT MAX(derivation_index) FROM derivation_paths WHERE wallet_id={wallet_id} and used=1;"
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        if row is not None and row[0] is not None:
+            index = uint32(row[0])
+            return await self.get_derivation_record(index, wallet_id)
 
         return None
 

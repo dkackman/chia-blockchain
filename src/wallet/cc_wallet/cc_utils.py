@@ -1,26 +1,24 @@
 import dataclasses
-
 from typing import List, Optional, Tuple
 
-from blspy import G2Element, AugSchemeMPL
+from blspy import AugSchemeMPL, G2Element
 
 from src.types.blockchain_format.coin import Coin
-from src.types.condition_opcodes import ConditionOpcode
 from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.condition_opcodes import ConditionOpcode
 from src.types.spend_bundle import CoinSolution, SpendBundle
 from src.util.condition_tools import conditions_dict_for_solution
 from src.util.ints import uint64
 from src.wallet.puzzles.cc_loader import CC_MOD, LOCK_INNER_PUZZLE
 from src.wallet.puzzles.genesis_by_coin_id_with_0 import (
-    lineage_proof_for_genesis,
-    lineage_proof_for_coin,
-    lineage_proof_for_zero,
     genesis_coin_id_for_genesis_coin_checker,
+    lineage_proof_for_coin,
+    lineage_proof_for_genesis,
+    lineage_proof_for_zero,
 )
 
-
-NULL_SIGNATURE = G2Element.generator() * 0
+NULL_SIGNATURE = G2Element()
 
 ANYONE_CAN_SPEND_PUZZLE = Program.to(1)  # simply return the conditions
 
@@ -90,7 +88,7 @@ def coin_solution_for_lock_coin(
 ) -> CoinSolution:
     puzzle_reveal = LOCK_INNER_PUZZLE.curry(prev_coin.as_list(), subtotal)
     coin = Coin(coin.name(), puzzle_reveal.get_tree_hash(), uint64(0))
-    coin_solution = CoinSolution(coin, Program.to([puzzle_reveal, 0]))
+    coin_solution = CoinSolution(coin, puzzle_reveal, Program.to(0))
     return coin_solution
 
 
@@ -122,7 +120,7 @@ def spend_bundle_for_spendable_ccs(
     # figure out what the output amounts are by running the inner puzzles & solutions
     output_amounts = []
     for cc_spend_info, inner_solution in zip(spendable_cc_list, inner_solutions):
-        error, conditions, cost = conditions_dict_for_solution(Program.to([cc_spend_info.inner_puzzle, inner_solution]))
+        error, conditions, cost = conditions_dict_for_solution(cc_spend_info.inner_puzzle, inner_solution)
         total = 0
         if conditions:
             for _ in conditions.get(ConditionOpcode.CREATE_COIN, []):
@@ -157,9 +155,7 @@ def spend_bundle_for_spendable_ccs(
             next_bundle,
             subtotals[index],
         ]
-        full_solution = Program.to([puzzle_reveal, solution])
-
-        coin_solution = CoinSolution(input_coins[index], full_solution)
+        coin_solution = CoinSolution(input_coins[index], puzzle_reveal, Program.to(solution))
         coin_solutions.append(coin_solution)
 
     if sigs is None or sigs == []:
@@ -226,7 +222,7 @@ def spendable_cc_list_from_coin_solution(coin_solution: CoinSolution, hash_to_pu
     spendable_cc_list = []
 
     coin = coin_solution.coin
-    puzzle = coin_solution.solution.first()
+    puzzle = coin_solution.puzzle_reveal
     r = uncurry_cc(puzzle)
     if r:
         mod_hash, genesis_coin_checker, inner_puzzle = r

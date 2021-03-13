@@ -4,21 +4,41 @@ min_mainnet_k_size: 32
 ping_interval: 120
 self_hostname: &self_hostname "localhost"
 daemon_port: 55400
+inbound_rate_limit_percent: 100
+outbound_rate_limit_percent: 30
 
 network_overrides: &network_overrides
-  testnet0:
-    GENESIS_CHALLENGE: "0000000000000000000000000000000000000000000000000000000000000000"
-  testnet1:
-    DIFFICULTY_CONSTANT_FACTOR: 33554432
-    DIFFICULTY_STARTING: 16777216
-    GENESIS_CHALLENGE: "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"  # std_hash(b"1")
-    GENESIS_PRE_FARM_POOL_PUZZLE_HASH: "23b039a829f3ed14a260355b9fc55d9ccc4539f05bd4bf529fd2630de1751d52"
-    GENESIS_PRE_FARM_FARMER_PUZZLE_HASH: "23b039a829f3ed14a260355b9fc55d9ccc4539f05bd4bf529fd2630de1751d52"
-  testnet2:
-    GENESIS_CHALLENGE: "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35" # std_hash(b"2")
+  constants:
+    mainnet:
+      NETWORK_TYPE: 0
+      GENESIS_CHALLENGE: null
+    testnet0:
+      MIN_PLOT_SIZE: 18
+      GENESIS_CHALLENGE: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      NETWORK_TYPE: 1
+    testnet5:
+      GENESIS_CHALLENGE: f4c0c9d5b3cd59d6f7c76ecd780e646a2c55064367d0ddbb42b2b6462a4674b2
+      NETWORK_TYPE: 1
+      GENESIS_PRE_FARM_POOL_PUZZLE_HASH: "70ac50c1faf71293113e7572e538234065ead0c193241256a620d6f52e06d86a"
+      GENESIS_PRE_FARM_FARMER_PUZZLE_HASH: "9e6a07d5cbc019b2fdef559d7c7f8d2a80412546ad6e00c67a19bcdcacd32cab"
+    testnet6:
+      GENESIS_CHALLENGE: null
+      NETWORK_TYPE: 1
+      GENESIS_PRE_FARM_POOL_PUZZLE_HASH: "70ac50c1faf71293113e7572e538234065ead0c193241256a620d6f52e06d86a"
+      GENESIS_PRE_FARM_FARMER_PUZZLE_HASH: "9e6a07d5cbc019b2fdef559d7c7f8d2a80412546ad6e00c67a19bcdcacd32cab"
+  config:
+    mainnet:
+      address_prefix: "xch"
+    testnet0:
+      address_prefix: "txch"
+    testnet5:
+      address_prefix: "txch"
+    testnet6:
+      address_prefix: "txch"
 
-
-selected_network: &selected_network "testnet2"
+selected_network: &selected_network "testnet6"
+ALERTS_URL: https://download.chia.net/notify/testnet_6_alert.txt
+CHIA_ALERTS_PUBKEY: 89b7fd87cb56e926ecefb879a29aae308be01f31980569f6a75a69d2a9a69daefd71fb778d865f7c50d6c967e3025937
 
 # public ssl ca is included in source code
 # Privet ssl ca is used for trusted connections between machines user owns
@@ -174,9 +194,9 @@ full_node:
   port: 58444
 
   # Run multiple nodes with different databases by changing the database_path
-  database_path: db/blockchain_v28_CHALLENGE.sqlite
+  database_path: db/blockchain_v30_CHALLENGE.sqlite
   peer_db_path: db/peer_table_node.sqlite
-  simulator_database_path: sim_db/simulator_blockchain_v28_CHALLENGE.sqlite
+  simulator_database_path: sim_db/simulator_blockchain_v30_CHALLENGE.sqlite
   simulator_peer_db_path: sim_db/peer_table_node.sqlite
 
   # If True, starts an RPC server at the following port
@@ -206,10 +226,10 @@ full_node:
   recent_peer_threshold: 6000
 
   # Send to a Bluebox (sanatizing timelord) uncompact blocks once every
-  # 'send_uncompact_interval' seconds. The recommended value is
-  # send_uncompact_interval=1800. This sends 50 proofs every 30 minutes.
-  # Set to 0 if you don't use this feature.
+  # 'send_uncompact_interval' seconds. Set to 0 if you don't use this feature.
   send_uncompact_interval: 0
+  # At every 'send_uncompact_interval' seconds, send blueboxes 'target_uncompact_proofs' proofs to be normalized.
+  target_uncompact_proofs: 100
 
   farmer_peer:
       host: *self_hostname
@@ -218,7 +238,7 @@ full_node:
       host: *self_hostname
       port: 8446
   introducer_peer:
-      host: introducer.beta.chia.net  # Chia AWS introducer IPv4/IPv6
+      host: introducer1.beta.chia.net  # Chia AWS introducer IPv4/IPv6
       port: 58444
   wallet_peer:
     host: *self_hostname
@@ -286,7 +306,7 @@ wallet:
     port: 58444
 
   testing: False
-  database_path: wallet/db/blockchain_wallet_v28_CHALLENGE_KEY.sqlite
+  database_path: wallet/db/blockchain_wallet_v30_CHALLENGE_KEY.sqlite
   wallet_peers_path: wallet/db/wallet_peers.sqlite
 
   logging: *logging
@@ -300,7 +320,7 @@ wallet:
   recent_peer_threshold: 6000
 
   introducer_peer:
-    host: introducer.beta.chia.net # Chia AWS introducer IPv4/IPv6
+    host: introducer1.beta.chia.net # Chia AWS introducer IPv4/IPv6
     port: 58444
 
   ssl:

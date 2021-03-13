@@ -1,5 +1,5 @@
-from clvm_tools import binutils
 from clvm import SExp
+from clvm_tools import binutils
 
 from src.types.blockchain_format.program import SerializedProgram
 from src.types.spend_bundle import SpendBundle
@@ -14,6 +14,9 @@ def best_solution_program(bundle: SpendBundle) -> SerializedProgram:
     """
     r = []
     for coin_solution in bundle.coin_solutions:
-        entry = [coin_solution.coin.name(), coin_solution.solution]
+        entry = [
+            [coin_solution.coin.parent_coin_info, coin_solution.coin.amount],
+            [coin_solution.puzzle_reveal, coin_solution.solution],
+        ]
         r.append(entry)
     return SerializedProgram.from_bytes(SExp.to((binutils.assemble("#q"), r)).as_bin())

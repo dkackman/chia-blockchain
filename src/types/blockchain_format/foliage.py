@@ -1,20 +1,21 @@
 from dataclasses import dataclass
 from typing import List, Optional
+
 from blspy import G2Element
 
+from src.types.blockchain_format.coin import Coin
+from src.types.blockchain_format.pool_target import PoolTarget
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.util.ints import uint64
 from src.util.streamable import Streamable, streamable
-from src.types.blockchain_format.pool_target import PoolTarget
-from src.types.blockchain_format.coin import Coin
 
 
 @dataclass(frozen=True)
 @streamable
 class TransactionsInfo(Streamable):
     # Information that goes along with each transaction block
-    previous_generators_root: bytes32  # This needs to be a tree hash
     generator_root: bytes32  # This needs to be a tree hash
+    generator_refs_root: bytes32  # sha256 of the concatenation of the generator ref list entries
     aggregated_signature: G2Element
     fees: uint64  # This only includes user fees, not block rewards
     cost: uint64
@@ -48,7 +49,8 @@ class FoliageBlockData(Streamable):
 @streamable
 class Foliage(Streamable):
     # The entire foliage block, containing signature and the unsigned back pointer
-    # The hash of this is the "header hash"
+    # The hash of this is the "header hash". Note that for unfinished blocks, the prev_block_hash
+    # Is the prev from the signage point, and can be replaced with a more recent block
     prev_block_hash: bytes32
     reward_block_hash: bytes32
     foliage_block_data: FoliageBlockData

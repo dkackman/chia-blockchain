@@ -1,18 +1,22 @@
+import time
 import traceback
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
 
-from src.types.condition_var_pair import ConditionVarPair
-from src.types.spend_bundle import SpendBundle
-from src.types.coin_record import CoinRecord
-from src.types.name_puzzle_condition import NPC
 from src.types.blockchain_format.program import SerializedProgram
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.coin_record import CoinRecord
+from src.types.condition_var_pair import ConditionVarPair
+from src.types.name_puzzle_condition import NPC
+from src.types.spend_bundle import SpendBundle
 from src.util.clvm import int_from_bytes
 from src.util.condition_tools import ConditionOpcode, conditions_by_opcode
 from src.util.errors import Err
-import time
-from src.util.ints import uint64, uint32
-from src.wallet.puzzles.generator_loader import GENERATOR_MOD, GENERATOR_FOR_SINGLE_COIN_MOD
+from src.util.hash import std_hash
+from src.util.ints import uint32, uint64
+from src.wallet.puzzles.generator_loader import GENERATOR_FOR_SINGLE_COIN_MOD
+from src.wallet.puzzles.lowlevel_generator import get_generator
+
+GENERATOR_MOD = get_generator()
 
 
 def mempool_assert_announcement_consumed(condition: ConditionVarPair, spend_bundle: SpendBundle) -> Optional[Err]:
@@ -47,7 +51,7 @@ def mempool_assert_block_index_exceeds(
     except ValueError:
         return Err.INVALID_CONDITION
     if prev_transaction_block_height < block_index_exceeds_this:
-        return Err.ASSERT_BLOCK_INDEX_EXCEEDS_FAILED
+        return Err.ASSERT_HEIGHT_NOW_EXCEEDS_FAILED
     return None
 
 
@@ -63,7 +67,7 @@ def mempool_assert_block_age_exceeds(
     except ValueError:
         return Err.INVALID_CONDITION
     if prev_transaction_block_height < block_index_exceeds_this:
-        return Err.ASSERT_BLOCK_AGE_EXCEEDS_FAILED
+        return Err.ASSERT_HEIGHT_AGE_EXCEEDS_FAILED
     return None
 
 
@@ -78,7 +82,7 @@ def mempool_assert_time_exceeds(condition: ConditionVarPair):
 
     current_time = uint64(int(time.time() * 1000))
     if current_time <= expected_mili_time:
-        return Err.ASSERT_TIME_EXCEEDS_FAILED
+        return Err.ASSERT_SECONDS_NOW_EXCEEDS_FAILED
     return None
 
 
@@ -93,25 +97,33 @@ def mempool_assert_relative_time_exceeds(condition: ConditionVarPair, unspent: C
 
     current_time = uint64(int(time.time() * 1000))
     if current_time <= expected_mili_time + unspent.timestamp:
-        return Err.ASSERT_TIME_EXCEEDS_FAILED
+        return Err.ASSERT_SECONDS_NOW_EXCEEDS_FAILED
     return None
 
 
 def get_name_puzzle_conditions(block_program: SerializedProgram, safe_mode: bool):
     # TODO: allow generator mod to take something (future)
     # TODO: write more tests
+    block_program_args = SerializedProgram.from_bytes(b"\x80")
+
     try:
         if safe_mode:
-            cost, result = GENERATOR_MOD.run_safe_with_cost(block_program)
+            cost, result = GENERATOR_MOD.run_safe_with_cost(block_program, block_program_args)
         else:
-            cost, result = GENERATOR_MOD.run_with_cost(block_program)
+            cost, result = GENERATOR_MOD.run_with_cost(block_program, block_program_args)
         npc_list = []
         opcodes = set(item.value for item in ConditionOpcode)
         for res in result.as_iter():
             conditions_list = []
-            name = res.first().as_atom()
-            puzzle_hash = bytes32(res.rest().first().as_atom())
-            for cond in res.rest().rest().first().as_iter():
+            name = std_hash(
+                bytes(
+                    res.first().first().as_atom()
+                    + res.first().rest().first().as_atom()
+                    + res.first().rest().rest().first().as_atom()
+                )
+            )
+            puzzle_hash = bytes32(res.first().rest().first().as_atom())
+            for cond in res.rest().first().as_iter():
                 if cond.first().as_atom() in opcodes:
                     opcode = ConditionOpcode(cond.first().as_atom())
                 elif not safe_mode:
@@ -138,7 +150,8 @@ def get_name_puzzle_conditions(block_program: SerializedProgram, safe_mode: bool
 
 def get_puzzle_and_solution_for_coin(block_program: SerializedProgram, coin_name: bytes):
     try:
-        cost, result = GENERATOR_FOR_SINGLE_COIN_MOD.run_with_cost(block_program, coin_name)
+        block_program_args = SerializedProgram.from_bytes(b"\x80")
+        cost, result = GENERATOR_FOR_SINGLE_COIN_MOD.run_with_cost(block_program, block_program_args, coin_name)
         puzzle = result.first()
         solution = result.rest().first()
         return None, puzzle, solution
@@ -163,13 +176,13 @@ def mempool_check_conditions_dict(
                 error = mempool_assert_my_coin_id(cvp, unspent)
             elif cvp.opcode is ConditionOpcode.ASSERT_ANNOUNCEMENT:
                 error = mempool_assert_announcement_consumed(cvp, spend_bundle)
-            elif cvp.opcode is ConditionOpcode.ASSERT_BLOCK_INDEX_EXCEEDS:
+            elif cvp.opcode is ConditionOpcode.ASSERT_HEIGHT_NOW_EXCEEDS:
                 error = mempool_assert_block_index_exceeds(cvp, prev_transaction_block_height)
-            elif cvp.opcode is ConditionOpcode.ASSERT_BLOCK_AGE_EXCEEDS:
+            elif cvp.opcode is ConditionOpcode.ASSERT_HEIGHT_AGE_EXCEEDS:
                 error = mempool_assert_block_age_exceeds(cvp, unspent, prev_transaction_block_height)
-            elif cvp.opcode is ConditionOpcode.ASSERT_TIME_EXCEEDS:
+            elif cvp.opcode is ConditionOpcode.ASSERT_SECONDS_NOW_EXCEEDS:
                 error = mempool_assert_time_exceeds(cvp)
-            elif cvp.opcode is ConditionOpcode.ASSERT_RELATIVE_TIME_EXCEEDS:
+            elif cvp.opcode is ConditionOpcode.ASSERT_SECONDS_AGE_EXCEEDS:
                 error = mempool_assert_relative_time_exceeds(cvp, unspent)
             if error:
                 return error

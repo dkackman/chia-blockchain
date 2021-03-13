@@ -1,20 +1,19 @@
-from pathlib import Path
-from typing import Callable, Dict, Any, List, Optional
-
-import aiohttp
-import logging
 import asyncio
 import json
+import logging
 import traceback
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import aiohttp
 
 from src.server.outbound_message import NodeType
 from src.server.server import ssl_context_for_server
 from src.types.peer_info import PeerInfo
 from src.util.byte_types import hexstr_to_bytes
-from src.util.json_util import obj_to_response
-from src.util.ws_message import create_payload, format_response, pong
-from src.util.json_util import dict_to_json_str
 from src.util.ints import uint16
+from src.util.json_util import dict_to_json_str, obj_to_response
+from src.util.ws_message import create_payload, create_payload_dict, format_response, pong
 
 log = logging.getLogger(__name__)
 
@@ -54,12 +53,11 @@ class RpcServer:
             data = await self.get_connections({})
             if data is not None:
 
-                payload = create_payload(
+                payload = create_payload_dict(
                     "get_connections",
                     data,
                     self.service_name,
                     "wallet_ui",
-                    string=False,
                 )
                 payloads.append(payload)
         for payload in payloads:
@@ -67,8 +65,9 @@ class RpcServer:
                 payload["data"]["success"] = True
             try:
                 await self.websocket.send_str(dict_to_json_str(payload))
-            except Exception as e:
-                self.log.warning(f"Sending data failed. Exception {e}.")
+            except Exception:
+                tb = traceback.format_exc()
+                self.log.warning(f"Sending data failed. Exception {tb}.")
 
     def state_changed(self, *args):
         if self.websocket is None:
@@ -103,10 +102,12 @@ class RpcServer:
             # TODO add peaks for peers
             connections = self.rpc_api.service.server.get_connections()
             con_info = []
-            peak_store = self.rpc_api.service.sync_store.peer_to_peak
+            if self.rpc_api.service.sync_store is not None:
+                peak_store = self.rpc_api.service.sync_store.peer_to_peak
+            else:
+                peak_store = None
             for con in connections:
-
-                if con.peer_node_id in peak_store:
+                if peak_store is not None and con.peer_node_id in peak_store:
                     peak_hash, peak_height, peak_weight = peak_store[con.peer_node_id]
                 else:
                     peak_height = None
@@ -270,8 +271,9 @@ class RpcServer:
 
                 async with session.ws_connect(
                     f"wss://{self_hostname}:{daemon_port}",
-                    autoclose=False,
+                    autoclose=True,
                     autoping=True,
+                    heartbeat=60,
                     ssl_context=self.ssl_context,
                     max_msg_size=100 * 1024 * 1024,
                 ) as ws:

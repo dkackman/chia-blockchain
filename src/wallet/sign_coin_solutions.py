@@ -1,11 +1,10 @@
 from typing import Callable, List, Optional
+
 from blspy import AugSchemeMPL, PrivateKey
+
 from src.types.coin_solution import CoinSolution
 from src.types.spend_bundle import SpendBundle
-from src.util.condition_tools import (
-    conditions_dict_for_solution,
-    pkm_pairs_for_conditions_dict,
-)
+from src.util.condition_tools import conditions_dict_for_solution, pkm_pairs_for_conditions_dict
 
 
 async def sign_coin_solutions(
@@ -16,8 +15,8 @@ async def sign_coin_solutions(
     pk_list = []
     msg_list = []
     for coin_solution in coin_solutions:
-        # Get AGGSIG conditions
-        err, conditions_dict, cost = conditions_dict_for_solution(coin_solution.solution)
+        # Get AGG_SIG conditions
+        err, conditions_dict, cost = conditions_dict_for_solution(coin_solution.puzzle_reveal, coin_solution.solution)
         if err or conditions_dict is None:
             error_msg = f"Sign transaction failed, con:{conditions_dict}, error: {err}"
             raise ValueError(error_msg)

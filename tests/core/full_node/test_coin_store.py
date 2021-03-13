@@ -1,21 +1,21 @@
 import asyncio
 from pathlib import Path
-from typing import Optional, List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 import aiosqlite
 import pytest
 
-from src.consensus.block_rewards import calculate_pool_reward, calculate_base_farmer_reward
+from src.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
 from src.consensus.blockchain import Blockchain, ReceiveBlockResult
-from src.consensus.coinbase import create_pool_coin, create_farmer_coin
-from src.full_node.coin_store import CoinStore
+from src.consensus.coinbase import create_farmer_coin, create_pool_coin
 from src.full_node.block_store import BlockStore
+from src.full_node.coin_store import CoinStore
 from src.types.blockchain_format.coin import Coin
 from src.types.coin_record import CoinRecord
 from src.types.full_block import FullBlock
 from src.util.ints import uint64
-from tests.setup_nodes import test_constants, bt
 from src.util.wallet_tools import WalletTool
+from tests.setup_nodes import bt, test_constants
 
 WALLET_A = WalletTool()
 
@@ -256,7 +256,14 @@ class TestCoinStore:
     @pytest.mark.asyncio
     async def test_get_puzzle_hash(self):
         num_blocks = 20
-        blocks = bt.get_consecutive_blocks(num_blocks, guarantee_transaction_block=True)
+        farmer_ph = 32 * b"0"
+        pool_ph = 32 * b"1"
+        blocks = bt.get_consecutive_blocks(
+            num_blocks,
+            farmer_reward_puzzle_hash=farmer_ph,
+            pool_reward_puzzle_hash=pool_ph,
+            guarantee_transaction_block=True,
+        )
         db_path = Path("blockchain_test.db")
         if db_path.exists():
             db_path.unlink()
@@ -270,10 +277,9 @@ class TestCoinStore:
             assert res == ReceiveBlockResult.NEW_PEAK
         assert b.get_peak().height == num_blocks - 1
 
-        pool_coin, farmer_coin = get_future_reward_coins(blocks[-2])
+        coins_farmer = await coin_store.get_coin_records_by_puzzle_hash(True, pool_ph)
+        coins_pool = await coin_store.get_coin_records_by_puzzle_hash(True, farmer_ph)
 
-        coins_farmer = await coin_store.get_coin_records_by_puzzle_hash(farmer_coin.puzzle_hash)
-        coins_pool = await coin_store.get_coin_records_by_puzzle_hash(pool_coin.puzzle_hash)
         assert len(coins_farmer) == num_blocks - 2
         assert len(coins_pool) == num_blocks - 2
 

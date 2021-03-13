@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "This requires the chia python virtual environment."
-echo "Execute '. ./activate' if you have not already, before running."
+if [ -z "$VIRTUAL_ENV" ]; then
+  echo "This requires the chia python virtual environment."
+  echo "Execute '. ./activate' before running."
+	exit 1
+fi
 
 # Allows overriding the branch or commit to build in chia-blockchain-gui
 SUBMODULE_BRANCH=$1
@@ -68,6 +71,7 @@ if [ ! "$CI" ]; then
 
 	if [ "$SUBMODULE_BRANCH" ];
 	then
+    git fetch
 		git checkout "$SUBMODULE_BRANCH"
     git pull
 		echo ""

@@ -1,6 +1,5 @@
 import logging
 import pathlib
-
 from multiprocessing import freeze_support
 from typing import Dict
 
@@ -14,7 +13,6 @@ from src.server.start_service import run_service
 from src.util.config import load_config_cli
 from src.util.default_root import DEFAULT_ROOT_PATH
 
-
 # See: https://bugs.python.org/issue29288
 "".encode("idna")
 
@@ -25,20 +23,18 @@ log = logging.getLogger(__name__)
 def service_kwargs_for_full_node(
     root_path: pathlib.Path, config: Dict, consensus_constants: ConsensusConstants
 ) -> Dict:
-    overrides = config["network_overrides"][config["selected_network"]]
-    updated_constants = consensus_constants.replace_str_to_bytes(**overrides)
 
     full_node = FullNode(
         config,
         root_path=root_path,
-        consensus_constants=updated_constants,
+        consensus_constants=consensus_constants,
     )
     api = FullNodeAPI(full_node)
 
     upnp_list = []
     if config["enable_upnp"]:
         upnp_list = [config["port"]]
-
+    network_id = config["selected_network"]
     kwargs = dict(
         root_path=root_path,
         node=api.full_node,
@@ -49,7 +45,7 @@ def service_kwargs_for_full_node(
         upnp_ports=upnp_list,
         server_listen_ports=[config["port"]],
         on_connect_callback=full_node.on_connect,
-        network_id=updated_constants.GENESIS_CHALLENGE,
+        network_id=network_id,
     )
     if config["start_rpc_server"]:
         kwargs["rpc_info"] = (FullNodeRpcApi, config["rpc_port"])
@@ -58,7 +54,9 @@ def service_kwargs_for_full_node(
 
 def main():
     config = load_config_cli(DEFAULT_ROOT_PATH, "config.yaml", SERVICE_NAME)
-    kwargs = service_kwargs_for_full_node(DEFAULT_ROOT_PATH, config, DEFAULT_CONSTANTS)
+    overrides = config["network_overrides"]["constants"][config["selected_network"]]
+    updated_constants = DEFAULT_CONSTANTS.replace_str_to_bytes(**overrides)
+    kwargs = service_kwargs_for_full_node(DEFAULT_ROOT_PATH, config, updated_constants)
     return run_service(**kwargs)
 
 

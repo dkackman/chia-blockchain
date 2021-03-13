@@ -1,63 +1,28 @@
-import aiohttp
 import asyncio
-import time
-from time import struct_time, localtime
-from src.util.config import load_config
-from src.util.default_root import DEFAULT_ROOT_PATH
-from src.util.byte_types import hexstr_to_bytes
+
+import aiohttp
+import click
 
 from src.rpc.full_node_rpc_client import FullNodeRpcClient
+from src.util.byte_types import hexstr_to_bytes
+from src.util.config import load_config
+from src.util.default_root import DEFAULT_ROOT_PATH
+from src.util.ints import uint16
 
 
-def make_parser(parser):
-
-    parser.add_argument(
-        "-d",
-        "--delta-block-height",
-        help="Compare a block X blocks older."
-        + "Defaults to 192 blocks (~1 hour) and Peak block as the starting block."
-        + "Use --start BLOCK_HEIGHT to specify starting block",
-        type=str,
-        default="192",
-    )
-    parser.add_argument(
-        "-s",
-        "--start",
-        help="Newest block used to calculate estimated total network space. Defaults to Peak block.",
-        type=str,
-        default="",
-    )
-    parser.add_argument(
-        "-p",
-        "--rpc-port",
-        help="Set the port where the Full Node is hosting the RPC interface."
-        + "See the rpc_port under full_node in config.yaml. Defaults to 8555",
-        type=int,
-    )
-    parser.set_defaults(function=netspace)
-
-
-def human_local_time(timestamp):
-    time_local = struct_time(localtime(timestamp))
-    return time.strftime("%a %b %d %Y %T %Z", time_local)
-
-
-async def netstorge_async(args, parser):
+async def netstorge_async(rpc_port: int, delta_block_height: str, start: str) -> None:
     """
-    Calculates the estimated space on the network given two block header hases
-    # TODO: add help on failure/no args
+    Calculates the estimated space on the network given two block header hashes.
     """
     try:
         config = load_config(DEFAULT_ROOT_PATH, "config.yaml")
         self_hostname = config["self_hostname"]
-        if "rpc_port" not in args or args.rpc_port is None:
+        if rpc_port is None:
             rpc_port = config["full_node"]["rpc_port"]
-        else:
-            rpc_port = args.rpc_port
-        client = await FullNodeRpcClient.create(self_hostname, rpc_port, DEFAULT_ROOT_PATH, config)
+        client = await FullNodeRpcClient.create(self_hostname, uint16(rpc_port), DEFAULT_ROOT_PATH, config)
 
-        if args.delta_block_height:
-            if args.start == "":
+        if delta_block_height:
+            if start == "":
                 blockchain_state = await client.get_blockchain_state()
                 if blockchain_state["peak"] is None:
                     print("No blocks in blockchain")
@@ -67,9 +32,9 @@ async def netstorge_async(args, parser):
 
                 newer_block_height = blockchain_state["peak"].height
             else:
-                newer_block = await client.get_block_record(hexstr_to_bytes(args.start))
+                newer_block = await client.get_block_record(hexstr_to_bytes(start))
                 if newer_block is None:
-                    print("Block header hash", args.start, "not found.")
+                    print("Block header hash", start, "not found.")
                     client.close()
                     await client.await_closed()
                     return None
@@ -78,7 +43,7 @@ async def netstorge_async(args, parser):
                     newer_block_height = newer_block.height
 
             newer_block_header = await client.get_block_record_by_height(newer_block_height)
-            older_block_height = max(0, newer_block_height - int(args.delta_block_height))
+            older_block_height = max(0, newer_block_height - int(delta_block_height))
             older_block_header = await client.get_block_record_by_height(older_block_height)
             network_space_bytes_estimate = await client.get_network_space(
                 newer_block_header.header_hash, older_block_header.header_hash
@@ -105,7 +70,7 @@ async def netstorge_async(args, parser):
 
     except Exception as e:
         if isinstance(e, aiohttp.client_exceptions.ClientConnectorError):
-            print(f"Connection error. Check if full node rpc is running at {args.rpc_port}")
+            print(f"Connection error. Check if full node rpc is running at {rpc_port}")
         else:
             print(f"Exception {e}")
 
@@ -113,5 +78,39 @@ async def netstorge_async(args, parser):
     await client.await_closed()
 
 
-def netspace(args, parser):
-    return asyncio.run(netstorge_async(args, parser))
+@click.command("netspace", short_help="Estimate total farmed space on the network")
+@click.option(
+    "-p",
+    "--rpc-port",
+    help=(
+        "Set the port where the Full Node is hosting the RPC interface. "
+        "See the rpc_port under full_node in config.yaml. "
+        "[default: 8555]"
+    ),
+    type=int,
+    show_default=True,
+)
+@click.option(
+    "-d",
+    "--delta-block-height",
+    help=(
+        "Compare a block X blocks older to estimate total network space. "
+        "Defaults to 1000 blocks (~5.2 hours) and Peak block as the starting block. "
+        "Use --start BLOCK_HEIGHT to specify starting block. "
+        "Use 192 blocks to estimate over the last hour."
+    ),
+    type=str,
+    default="1000",
+)
+@click.option(
+    "-s",
+    "--start",
+    help="Newest block used to calculate estimated total network space. Defaults to Peak block.",
+    type=str,
+    default="",
+)
+def netspace_cmd(rpc_port: int, delta_block_height: str, start: str) -> None:
+    """
+    Calculates the estimated space on the network given two block header hashes.
+    """
+    asyncio.run(netstorge_async(rpc_port, delta_block_height, start))

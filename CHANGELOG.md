@@ -6,9 +6,168 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project does not yet adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for setuptools_scm/PEP 440 reasons.
 
-## 1.0rc2 aka Release Candidate 2 - 2021-02-18
+## 1.0rc7 aka Release Candidate 7 - 2020-03-12
+
+### Changed
+
+- Our green flag test blockchain launch worked but it uncovered a flaw in our installer versions. This release is a bug fix release to address that flaw. You should read the RC6 changes below if this is your first time installing since RC5.
+- `chia netspace` now defaults to 1000 blocks to mirror the GUI.
+- The installer build process was spruced up some.
+
+### Fixed
+
+- Installers were not correctly placing root TLS certificates into the bundle.
+- Weight proofs had a logic typo.
+
+## 1.0rc6 aka Release Candidate 6 - 2020-03-11
+
+### Added
+
+- This is a hard fork/breaking change from RC5. TXCH Coins will **not** be moved forward but your plots and keys and parts of your configuration do. We will be testing the final mainnet release strategy with the launch of RC6. For the test, those who are comfortable running the dev branch will update and start up their farms. All harvesters and plots will load and until the green flag drops, peers will be gossiped so your farm can establish good network connectivity. When the flag drops, each node will pull down the signed genesis challenge and start farming. Block 1 will be broadcast to anyone who hasn't seen the flag drop yet. The only difference for mainnet is that there will be 1.0 installers and a main branch release more than 24 hours before the real green flag.
+- There is now basic plot queueing functionality in the GUI. By default, plotting works as it has in the past. However you can now name a queue in Step 2 Advanced Options. Chose something like `first`. Everything you add to the `first` queue will start up like it has in the past but now you can go through the steps again and create a queue named `second` and it will immediately start plotting as if it is unaware of and parallel with `first`. A great use case is that you would set `first` to plot 5 plots sequentially and then you'd set `second` to plot 5 sequentially and that would give you two parallel queues of 5 plot's each. We will be returning to plotting speed and UI soon. Thanks @jespino for this clever work around for now.
+- There is now an option on the Farm page to manage your farming rewards receive addresses. This makes it easy to send your farming rewards to an offline wallet. This also checks your existing rewards addresses and warns if you do not have the matching private key. That is expected if you are using an offline wallet of course.
+- Functionally has been added to the farmer rpc including checking and changing your farming rewards target addresses.
+- Added the ability to translate material-ui components like `Row 1 of 10`. Thanks @jespino.
+- Arch linux support has been added to `sh install.sh`. Thanks @jespino.
+- Update FullBlock to Allow Generator References - a list of block heights of generators to be made available to the block program of the current block at generator runtime. This sets the stage for smart coins calling existing "libraries" already on the chain to lower fees and increase the scale of complex smart coins.
+
+## Changed
+
+- Remove `chia plots "-s" "--stripe_size"` and the strip size setting in the Advanced section of the GUI. We now always use the best default of 64K for the GUI and cli.
+- `chia keys add` takes secret words a prompt on the command line or stdin instead of command line arguments for security.
+- Version 1.0.1 of chiavdf was added. This brought MPIR on Windows to the most recent release. Additionally we removed inefficient ConvertIntegerToBytes() and ConvertBytesToInt() functions, use GMP library's mpz_export/mpz_import for big integers and simple helper functions for built-in integer types. The latter are taken from chiavdf. We now require compressed forms to be encoded canonically when deserializing. This should prevent potential grinding attacks where some non-canonical encodings of a compressed form could be used to change its hash and thus the next challenges derived from it. Canonically encoded compressed forms must be reduced and must produce the same string when deserialized and serialized again.
+- Version 1.0 of our BLS signature library is included. We brought Relic, gmp and MPIR up to their most recent releases. We again thank the Dash team for their fixes and improvements.
+- We now hand build Apple Silicon native binary wheels for all chia-blockchain dependencies and host them at [https://pypi.chia.net/simple](https://pypi.chia.net/simple). We are likely to hand build a MacOS ARM64 dmg available and certainly will for 1.0. You can install natively on M1 now with the `git clone` developer method today. Just make sure Python 3.9 is installed. `python3 --version` works.
+- The GUI now shows you which network you are connected to on the Full Node page. It will also wait patiently for the green flag to drop on a network launch.
+- In the GUI you can only plot k=32 or larger with the single exception of k=25 for testing. You will have to confirm choosing k=25 however. Thanks to @jespino for help on this and limiting the cli as well.
+- The restore smart wallets from backup prompt has been improved to better get the intent across and that it can be skipped.
+- At the top of the plotting wizard we have added text pointing out that you can plot without being in sync or on the internet.
+- Wallet no longer automatically creates a new hierarchical deterministic wallet receive address on each start. You can and still should choose a new one with the `NEW ADDRESS` button for each new transaction for privacy.
+- The network maximum k size is now set to k=50. We think that may be more storage than atoms in the solar system so it should be ok. But we will probably be hated for it in 200 years...
+- The formula for computing iterations is simplified, so that only one division is necessary, and inverting the (1-x) into just x.
+- There are new timestamp consensus rules. A block N must have a greater timestamp than block N-1. Also, a block's timestamp cannot be more than 5 minutes in the future. Note that we have decided that work factor difficulty resets are now going to be 24 hours on mainnet but are still shorter on testnet.
+- A List[Tuple[uint16, str]] is added to the peer network handshake. These are the capabilities that the node supports, to add new features to the protocol in an easy - soft fork - manner. The message_id is now before the data in each message.
+- Peer gossip limits were set.
+- Generators have been re-worked in CLVM. We added a chialisp deserialization puzzle and improved the low-level generator. We reduce the accepted atom size to 1MB during ChiaLisp native deserialization.
+- When processing mempool transactions, Coin IDs are now calculated from parent coin ID and amount
+- We implemented rate limiting for full node. This can and will lead to short term bans of certain peers that didn't behave in expected ways. This is ok and normal, but strong defense against many DDOS attacks.
+- `requirements-dev.txt` has been removed in favor of the CI actions and test scripts.
+- We have moved to a new and much higher scalability download.chia.net to support the mainnet launch flag and additional download demand.
+- To always get the latest testnet and then mainnet installers you can now use a latest URL: [Windows](https://download.chia.net/latest/Setup-Win64.exe) and [MacOS x86_64](https://download.chia.net/latest/Setup-MacOS.dmg).
+- Chia wheels not on Pypi and some dependecies not found there also are now on pypi.chia.net.
+- Additional typing has been added to the Python code with thanks to @jespino.
+- Cryptography and Keyring have been bumped to their current releases.
+- PRs and commits to the chia-blockchain-gui repository will automatically have their locales updated.
 
 ## Fixed
+
+- The Farm page will now no longer get stuck at 50 TXCH farmed.
+- `chia farm` has had multiple bugs and spelling issues addressed. Thanks to @alfonsoperez, @soulmerge and @olivernyc for your contributions.
+- `chia wallet` had various bugs.
+- Various weight proof improvements.
+- Some users on Big Sur could not plot from the GUI as the log window would be stuck on "Loading."
+- We believe we have fixed the chain stall/confused Timelord bug from ~ 13:00 UTC 3/10/21. We've added additional recovery logic as well.
+- Logs from receiving a duplicate compacted Proof of Time are much more human friendly.
+- We believe that the install/migrate process was bringing forward bad farming rewards receive addresses. We have attempted to stop that by only migrating RC3 and newer configurations. You can make sure you are not effected by using the Manage Farming Rewards tool mentioned above or putting a known good wallet receive address in both `xch_target_address` sections of config.yaml.
+- Wallet cached transactions incorrectly in some cases.
+
+## 1.0rc5 aka Release Candidate 5 - 2020-03-04
+
+### Added
+
+- The RC5 release is a new breaking change/hard fork blockchain. Plots and keys from previous chains will work fine on RC5 but balances of TXCH will not come forward.
+- We now support a "green flag" chain launch process. A new version of the software will poll download.chia.net/notify/ for a signed json file that will be the genesis block of the chain for that version. This will allow unattended start at mainnet.
+- Bluebox Timelords are back. These are Timelords most anyone can run. They search through the historical chain and find large proofs of times and compact them down to their smallest representation. This significantly speeds up syncing for newly started nodes. Currently this is only supported on Linux and MacOS x86_64 but we will expand that. Any desktop or server of any age will be fast enough to be a useful Bluebox Timelord.
+- Thanks to @jespino there is now `chia farm show`. You can now get almost exactly the same farming information on the CLI as the GUI.
+- We have added Romanian to the GUI translations. Thank you to @bicilis on [Crowdin](https://crowdin.com/project/chia-blockchain). We also added a couple of additional target languages. Klingon anyone?
+- `chia wallet` now takes get_address to get a new wallet receive address from the CLI.
+- `chia plots check` will list out all the failed plot filenames at the end of the report. Thanks for the PR go to @eFishCent.
+- Chialisp and the clvm have had the standard puzzle updated and we replaced `((c P A))` with `(a P A)`.
+
+## Changed
+
+- Testnets and mainnet now set their minimum `k` size and enforce it. RC5 testnet will reject plots of size less than k=32.
+- Sub slots now require 16 blocks instead of 12.
+- Thanks to @xdustinface of Dash, the BlS Signature library has been updated to 0.9 with clean ups and some speed ups. This changed how the G2 infinity element was handled and we now manage it inside of chia-blockchain, etc., instead of in blspy.
+- We have updated the display of peer nodes and moved adding a peer to it's own pop up in the GUI.
+- Block searching in the GUI has been improved.
+- @jespino added i18n support and refactored how locales are loaded in the GUI. Additionally he moved more strings into the translation infrastructure for translators.
+- In chiavdf we changed n-Wesolowski proofs to include B instead of y in segments. Proof segments now have the form (iters, B, proof) instead of (iters, y, proof). This reduces proof segment size from 208 to 141 bytes.
+- The new chiavdf proof format is not compatible with the old one, however zero-Wesolowski proofs are not affected as they have zero proof segments and consist only of (y, proof).
+- We made two HashPrime optimizations in chiavdf. This forces numbers being tested for primality to be odd and avoids an unnecessary update of the sprout vector by stopping after the first non-zero value. This is a breaking change as it changes the prime numbers generated from a given seed. We believe this is the final breaking change for chiavdf.
+- chiabip158 was set to a gold 1.0 version.
+- Comments to Chialisp and clvm source have been updated for all of the Chialisp changes over the proceeding three weeks.
+- And thanks yet again to @jespino for a host of PRs to add more detailed typing to various components in chia-blockchain.
+- aiohttp was updated to 3.7.4 to address a low severity [security issue](https://github.com/advisories/GHSA-v6wp-4m6f-gcjg).
+- calccrypto/uint128_t was updated in the Windows chiapos implementation. Chiapos required some changes its build process to support MacOS ARM64.
+
+### Fixed
+
+- Harvester would crash if it encountered more than 16,000 plot files or 256 directories.
+- Nodes that were interrupted by a network crash or standby on a laptop were not syncing upon reconnection in RC4.
+- Sync issues could stop syncing from restarting and could lead to a peer host that you could not remove.
+- Adding Click changed the behavior of `chia keys add -m`. The help now makes it clear that the 24 word mnemonic needs to be surrounded by a pair of quotes.
+- Python root CA certificates have issues so we have added the Mozilla certificate store via curl.se and use that to connect to backup.chia.net via https, for example.
+- The difficulty adjustment calculation was simplified.
+- All of the chia sub repositories that were attempting to build MacOS Universal wheels were only generating x86_64 wheels internally. We have moved back to only generating x86_64 MacOS wheels on CI.
+- However, we have updated and test compiled all Chia dependencies on Apple Silicon and will be making available a test .dmg for MacOS ARM64 shortly.
+- Various weight proof edge cases have been fixed.
+- Various typos and style clean ups were made to the Click CLI implementation. `chia -upnp f` was added to disable uPnP.
+- `chia plots check` shouldn't crash when encountering plots that cause RuntimeError. PR again thanks to @eFishCent.
+- Coloured coin announcements had a bug that would allow counterfeiting.
+
+## 1.0rc4 aka Release Candidate 4 - 2020-02-25
+
+### Fixed
+
+- This is a bug fix release for RC3. There was an unexpected interaction between the GUI and the Click cli tool regarding Windows that made GUI plotting not start on all GUIs.
+
+## 1.0rc3 aka Release Candidate 3 - 2021-02-25
+
+### Added
+
+- RC3 is a new chain to support the last major chialisp changes. TXCH from the RC1/2 chain do not come forward to this chain but plots and keys continue to work as usual.
+- We have lowered the transaction lock to the first 5000 blocks to facilitate testing. We also started this chain at a lower difficulty.
+- A new RPC api: /push_tx. Using this RPC, you can spend custom chialisp programs. You need to make a SpendBundle, which includes the puzzle reveal (chialisp), a solution (chialisp) and a signature.
+- You can now use the RPC apis to query the mempool.
+- There are now Swedish, Spanish, and Slovak translations. Huge thanks to @ordtrogen (Swedish), @jespino and @dvd101x (Spanish), and our own @seeden (Slovak). Also thanks were due to @f00b4r (Finnish), @A-Caccese (Italian), and @Bibop182 and @LeonidShamis (Russian). Quite a few more are almost complete and ready for inclusion. You can help translate and review translations at our [crowdin project](https://crowdin.com/project/chia-blockchain).
+- You can obtain a new wallet receive address on the command line with `chia wallet new_address`. Thanks to @jespino for this and a lot more in the next section below.
+- You will now see Your Harvester Network in the GUI even if you have no plots.
+
+### Changed
+
+- All chialisp opcodes have been renumbered. This should be the last major breaking change for chialisp and the clvm. There are a couple minor enhancements still needed for mainnet launch, but they may or may not require minor breaking changes. We will be restarting testnet chains on a mostly weekly basis either way.
+- Node batch syncing performance was increased, and it now avoids re-validating blocks that node had already validated.
+- The entire CLI has been ported to [Click](https://click.palletsprojects.com/en/7.x/). Huge thanks to @jespino for the big assist and @unparalleled-js for the [recommendation and the initial start](https://github.com/Chia-Network/chia-blockchain/issues/464). This will make building out the CLI much easier. There are some subtle changes and some shortcuts are not there anymore. `chia -h` and `chia SUBCOMMAND -h` can be your guide.
+- We have upgraded Electron to 11.3 to support Apple Silicon. There are still one or two issues in our build chain for Apple Silicon but we should have an M1 native build shortly.
+- The websocket address is no longer displayed in the GUI unless it is running as a remote GUI. Thanks @dkackman !
+- `chia plots check` now will continue checking after it finds an error in a plot to the total number of checks you specified.
+- If you run install-gui.sh or install-timelord.sh without being in the venv, the script will warn you that you need to `. ./activate` and exit with error.
+- If you attempt to install on a 32 bit Pi/ARM OS, the installer exits with a helpful error message. You  can still fail when running under a 64 bit kernel but using a 32 bit Python 3.
+- The application is now more aware of whether it is running a testnet or mainnet. This impacts wallet's display behavior and certain blockchain validation rules.
+- Interface improvements for `chia netspace`.
+- Now that aiosqlite included our upstream improvements we install version 0.17.0.
+- `chia init` only migrates release candidate directories. The versioned sub directories under `~/chia` will be going away before mainnet.
+
+### Fixed
+
+- The GUI was often getting stuck on connecting to wallet. We beleive we have resolved this.
+- We identified and fixed an issue where harvester would crash, especially when loading plots or checking a large amount of plots.
+- The software now reports not synced in the GUI if not synced or being behind by 7 minutes or more.
+- Difficulty was set too high for the RC1/2 chain. This lead to odd rewards behaviour as well as difficulty artificially could not fall as low as it should.
+- Don't load plots that don't need to be loaded.
+- We made various fixes and changes to weight proofs.
+- Some configuration values were improperly ignored in migrations.
+- Some debug logging was accidentally left in.
+- `chia configure -log-level` was broken.
+- We believe we finally have the Windows Installer obtaining the correct version information at build time.
+- The application was sometimes not cancel pending items when closing certain websockets.
+- Fixed filter hash and generator validation.
+- Recursive replace was being called from the test suite.
+
+## 1.0rc2 aka Release Candidate 2 - 2021-02-18
+
+### Fixed
 
 - This is an errata release for Release Candidate 1. There were a couple of things that did not smoothly migrate from the Beta versions. Please make sure you also consult the [release notes for RC-1](https://github.com/Chia-Network/chia-blockchain/releases/tag/1.0rc1) was well.
 - Incorrect older spend to addresses were being migrated from Beta 27. This would send farming rewards to un-spendable coins.

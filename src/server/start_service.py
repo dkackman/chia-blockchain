@@ -2,26 +2,24 @@ import asyncio
 import logging
 import logging.config
 import signal
-
 from sys import platform
-from typing import Any, List, Optional, Tuple, Callable
+from typing import Any, Callable, List, Optional, Tuple
 
 from src.server.ssl_context import private_ssl_ca_paths, chia_ssl_ca_paths
-from src.types.blockchain_format.sized_bytes import bytes32
 
 try:
     import uvloop
 except ImportError:
     uvloop = None
 
+from src.rpc.rpc_server import start_rpc_server
 from src.server.outbound_message import NodeType
 from src.server.server import ChiaServer
 from src.server.upnp import upnp_remap_port
 from src.types.peer_info import PeerInfo
-from src.util.logging import initialize_logging
+from src.util.chia_logging import initialize_logging
 from src.util.config import load_config, load_config_cli
 from src.util.setproctitle import setproctitle
-from src.rpc.rpc_server import start_rpc_server
 
 from .reconnect_task import start_reconnect_task
 
@@ -35,7 +33,7 @@ class Service:
         node_type: NodeType,
         advertised_port: int,
         service_name: str,
-        network_id=bytes32,
+        network_id: str,
         upnp_ports: List[int] = [],
         server_listen_ports: List[int] = [],
         connect_peers: List[PeerInfo] = [],
@@ -55,7 +53,7 @@ class Service:
         self._node_type = node_type
         self._service_name = service_name
         self._rpc_task = None
-        self._network_id = network_id
+        self._network_id: str = network_id
 
         proctitle_name = f"chia_{service_name}"
         setproctitle(proctitle_name)
@@ -70,6 +68,9 @@ class Service:
         self._rpc_info = rpc_info
         private_ca_crt, private_ca_key = private_ssl_ca_paths(root_path, self.config)
         chia_ca_crt, chia_ca_key = chia_ssl_ca_paths(root_path, self.config)
+        inbound_rlp = self.config.get("inbound_rate_limit_percent")
+        outbound_rlp = self.config.get("outbound_rate_limit_percent")
+        assert inbound_rlp and outbound_rlp
         self._server = ChiaServer(
             advertised_port,
             node,
@@ -77,6 +78,8 @@ class Service:
             node_type,
             ping_interval,
             network_id,
+            inbound_rlp,
+            outbound_rlp,
             root_path,
             service_config,
             (private_ca_crt, private_ca_key),

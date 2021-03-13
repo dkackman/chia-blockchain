@@ -2,3 +2,7 @@
 	path = chia-blockchain-gui
 	url = https://github.com/dkackman/chia-blockchain-gui.git
 	branch = dev
+
+[submodule "mozilla-ca"]
+	path = mozilla-ca
+	url = https://github.com/Chia-Network/mozilla-ca.git

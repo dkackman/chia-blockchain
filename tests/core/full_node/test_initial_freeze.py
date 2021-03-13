@@ -1,4 +1,5 @@
 import asyncio
+
 import pytest
 
 from src.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
@@ -7,12 +8,13 @@ from src.protocols import full_node_protocol, wallet_protocol
 from src.protocols.protocol_message_types import ProtocolMessageTypes
 from src.simulator.full_node_simulator import FullNodeSimulator
 from src.simulator.simulator_protocol import FarmNewBlockProtocol
+from src.types.mempool_inclusion_status import MempoolInclusionStatus
 from src.types.peer_info import PeerInfo
 from src.util.errors import Err
 from src.util.ints import uint16, uint32
 from src.wallet.transaction_record import TransactionRecord
 from tests.core.full_node.test_full_node import add_dummy_connection
-from tests.setup_nodes import setup_simulators_and_wallets, self_hostname, bt
+from tests.setup_nodes import bt, self_hostname, setup_simulators_and_wallets
 from tests.time_out_assert import time_out_assert
 
 
@@ -55,7 +57,7 @@ class TestTransactions:
         tx: TransactionRecord = await wallet.generate_signed_transaction(100, ph, 0)
         spend = wallet_protocol.SendTransaction(tx.spend_bundle)
         response = await full_node_api.send_transaction(spend)
-        assert response is None
+        assert wallet_protocol.TransactionAck.from_bytes(response.data).status == MempoolInclusionStatus.FAILED
 
         new_spend = full_node_protocol.NewTransaction(tx.spend_bundle.name(), 1, 0)
         response = await full_node_api.new_transaction(new_spend)
@@ -78,6 +80,7 @@ class TestTransactions:
         spend = wallet_protocol.SendTransaction(tx.spend_bundle)
         response = await full_node_api.send_transaction(spend)
         assert response is not None
+        assert wallet_protocol.TransactionAck.from_bytes(response.data).status == MempoolInclusionStatus.SUCCESS
         assert ProtocolMessageTypes(response.type) == ProtocolMessageTypes.transaction_ack
 
     @pytest.mark.asyncio

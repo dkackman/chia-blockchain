@@ -1,18 +1,16 @@
 import pathlib
-
 from typing import Dict
 
 from src.consensus.constants import ConsensusConstants
 from src.consensus.default_constants import DEFAULT_CONSTANTS
 from src.harvester.harvester import Harvester
 from src.harvester.harvester_api import HarvesterAPI
+from src.rpc.harvester_rpc_api import HarvesterRpcApi
 from src.server.outbound_message import NodeType
+from src.server.start_service import run_service
 from src.types.peer_info import PeerInfo
 from src.util.config import load_config_cli
 from src.util.default_root import DEFAULT_ROOT_PATH
-from src.rpc.harvester_rpc_api import HarvesterRpcApi
-
-from src.server.start_service import run_service
 
 # See: https://bugs.python.org/issue29288
 "".encode("idna")
@@ -26,12 +24,12 @@ def service_kwargs_for_harvester(
     consensus_constants: ConsensusConstants,
 ) -> Dict:
     connect_peers = [PeerInfo(config["farmer_peer"]["host"], config["farmer_peer"]["port"])]
-    overrides = config["network_overrides"][config["selected_network"]]
+    overrides = config["network_overrides"]["constants"][config["selected_network"]]
     updated_constants = consensus_constants.replace_str_to_bytes(**overrides)
 
     harvester = Harvester(root_path, config, updated_constants)
     peer_api = HarvesterAPI(harvester)
-
+    network_id = config["selected_network"]
     kwargs = dict(
         root_path=root_path,
         node=harvester,
@@ -42,7 +40,7 @@ def service_kwargs_for_harvester(
         server_listen_ports=[config["port"]],
         connect_peers=connect_peers,
         auth_connect_peers=True,
-        network_id=updated_constants.GENESIS_CHALLENGE,
+        network_id=network_id,
     )
     if config["start_rpc_server"]:
         kwargs["rpc_info"] = (HarvesterRpcApi, config["rpc_port"])

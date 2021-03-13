@@ -2,29 +2,31 @@ import asyncio
 import logging
 import ssl
 import time
-from ipaddress import ip_address, IPv6Address
+import traceback
+from ipaddress import IPv6Address, ip_address
 from pathlib import Path
 from secrets import token_bytes
-from typing import Any, List, Dict, Callable, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from aiohttp import ClientSession, ClientTimeout, WSCloseCode, client_exceptions, web, ServerDisconnectedError
 from aiohttp.web_app import Application
 from aiohttp.web_runner import TCPSite
-from aiohttp import web, ClientTimeout, client_exceptions, ClientSession
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 
 from src.protocols.protocol_message_types import ProtocolMessageTypes
+from src.protocols.shared_protocol import protocol_version
 from src.server.introducer_peers import IntroducerPeers
-from src.server.outbound_message import NodeType, Message
+from src.server.outbound_message import Message, NodeType
 from src.server.ssl_context import private_ssl_paths, public_ssl_paths
 from src.server.ws_connection import WSChiaConnection
-from src.types.peer_info import PeerInfo
 from src.types.blockchain_format.sized_bytes import bytes32
-from src.util.errors import ProtocolError, Err
+from src.types.peer_info import PeerInfo
+from src.util.errors import Err, ProtocolError
 from src.util.ints import uint16
-from src.protocols.shared_protocol import protocol_version
-import traceback
+
+from src.util.network import is_localhost
 
 
 def ssl_context_for_server(
@@ -34,6 +36,13 @@ def ssl_context_for_server(
     ssl_context.check_hostname = False
     ssl_context.load_cert_chain(certfile=str(private_cert_path), keyfile=str(private_key_path))
     ssl_context.verify_mode = ssl.CERT_REQUIRED
+    return ssl_context
+
+
+def ssl_context_for_root(
+    ca_cert_file: str,
+) -> Optional[ssl.SSLContext]:
+    ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_cert_file)
     return ssl_context
 
 
@@ -58,7 +67,9 @@ class ChiaServer:
         api: Any,
         local_type: NodeType,
         ping_interval: int,
-        network_id: bytes32,
+        network_id: str,
+        inbound_rate_limit_percent: int,
+        outbound_rate_limit_percent: int,
         root_path: Path,
         config: Dict,
         private_ca_crt_key: Tuple[Path, Path],
@@ -84,8 +95,10 @@ class ChiaServer:
 
         self._ping_interval = ping_interval
         self._network_id = network_id
+        self._inbound_rate_limit_percent = inbound_rate_limit_percent
+        self._outbound_rate_limit_percent = outbound_rate_limit_percent
 
-        # Taks list to keep references to tasks, so they don't get GCd
+        # Task list to keep references to tasks, so they don't get GCd
         self._tasks: List[asyncio.Task] = []
 
         if name:
@@ -127,6 +140,9 @@ class ChiaServer:
         self.received_message_callback: Optional[Callable] = None
         self.api_tasks: Dict[bytes32, asyncio.Task] = {}
         self.tasks_from_peer: Dict[bytes32, Set[bytes32]] = {}
+        self.banned_peers: Dict[str, float] = {}
+        self.invalid_protocol_ban_seconds = 10
+        self.api_exception_ban_seconds = 10
 
     def my_id(self):
         """ If node has public cert use that one for id, if not use private."""
@@ -151,11 +167,19 @@ class ChiaServer:
             to_remove: List[WSChiaConnection] = []
             for connection in self.all_connections.values():
                 if self._local_type == NodeType.FULL_NODE and connection.connection_type == NodeType.FULL_NODE:
-                    if time.time() - connection.last_message_time > 1 * 3600:
+                    if time.time() - connection.last_message_time > 1800:
                         to_remove.append(connection)
             for connection in to_remove:
                 self.log.debug(f"Garbage collecting connection {connection.peer_host} due to inactivity")
                 await connection.close()
+
+            # Also garbage collect banned_peers dict
+            to_remove_ban = []
+            for peer_ip, ban_until_time in self.banned_peers.items():
+                if time.time() > ban_until_time:
+                    to_remove_ban.append(peer_ip)
+            for peer_ip in to_remove_ban:
+                del self.banned_peers[peer_ip]
 
     async def start_server(self, on_connect: Callable = None):
         if self._local_type in [NodeType.WALLET, NodeType.HARVESTER, NodeType.TIMELORD]:
@@ -190,6 +214,9 @@ class ChiaServer:
         self.log.info(f"Started listening on port: {self._port}")
 
     async def incoming_connection(self, request):
+        if request.remote in self.banned_peers and time.time() < self.banned_peers[request.remote]:
+            self.log.warning(f"Peer {request.remote} is banned, refusing connection")
+            return None
         ws = web.WebSocketResponse(max_msg_size=50 * 1024 * 1024)
         await ws.prepare(request)
         close_event = asyncio.Event()
@@ -211,6 +238,8 @@ class ChiaServer:
                 self.incoming_messages,
                 self.connection_closed,
                 peer_id,
+                self._inbound_rate_limit_percent,
+                self._outbound_rate_limit_percent,
                 close_event,
             )
             handshake = await connection.perform_handshake(
@@ -232,7 +261,7 @@ class ChiaServer:
                     self.introducer_peers.add(connection.get_peer_info())
         except ProtocolError as e:
             if connection is not None:
-                await connection.close()
+                await connection.close(self.invalid_protocol_ban_seconds, WSCloseCode.PROTOCOL_ERROR, e.code)
             if e.code == Err.INVALID_HANDSHAKE:
                 self.log.warning("Invalid handshake with peer. Maybe the peer is running old software.")
                 close_event.set()
@@ -246,6 +275,8 @@ class ChiaServer:
                 self.log.error(f"Exception {e}, exception Stack: {error_stack}")
                 close_event.set()
         except Exception as e:
+            if connection is not None:
+                await connection.close(ws_close_code=WSCloseCode.PROTOCOL_ERROR, error=Err.UNKNOWN)
             error_stack = traceback.format_exc()
             self.log.error(f"Exception {e}, exception Stack: {error_stack}")
             close_event.set()
@@ -254,6 +285,8 @@ class ChiaServer:
         return ws
 
     async def connection_added(self, connection: WSChiaConnection, on_connect=None):
+        # If we already had a connection to this peer_id, close the old one. This is secure because peer_ids are based
+        # on TLS public keys
         if connection.peer_node_id in self.all_connections:
             con = self.all_connections[connection.peer_node_id]
             await con.close()
@@ -266,7 +299,7 @@ class ChiaServer:
             self.log.error(f"Invalid connection type for connection {connection}")
 
     def is_duplicate_or_self_connection(self, target_node: PeerInfo) -> bool:
-        if (target_node.host == "127.0.0.1" or target_node.host == "localhost") and target_node.port == self._port:
+        if is_localhost(target_node.host) and target_node.port == self._port:
             # Don't connect to self
             self.log.debug(f"Not connecting to {target_node}")
             return True
@@ -288,6 +321,10 @@ class ChiaServer:
         An on connect method can also be specified, and this will be saved into the instance variables.
         """
         if self.is_duplicate_or_self_connection(target_node):
+            return False
+
+        if target_node.host in self.banned_peers and time.time() < self.banned_peers[target_node.host]:
+            self.log.warning(f"Peer {target_node.host} is still banned, not connecting to it")
             return False
 
         if auth:
@@ -314,8 +351,12 @@ class ChiaServer:
             self.log.debug(f"Connecting: {url}, Peer info: {target_node}")
             try:
                 ws = await session.ws_connect(
-                    url, autoclose=False, autoping=True, heartbeat=300, ssl=ssl_context, max_msg_size=50 * 1024 * 1024
+                    url, autoclose=True, autoping=True, heartbeat=60, ssl=ssl_context, max_msg_size=50 * 1024 * 1024
                 )
+            except ServerDisconnectedError:
+                self.log.debug(f"Server disconnected error connecting to {url}. Perhaps we are banned by the peer.")
+                await session.close()
+                return False
             except asyncio.TimeoutError:
                 self.log.debug(f"Timeout error connecting to {url}")
                 await session.close()
@@ -340,6 +381,8 @@ class ChiaServer:
                     self.incoming_messages,
                     self.connection_closed,
                     peer_id,
+                    self._inbound_rate_limit_percent,
+                    self._outbound_rate_limit_percent,
                     session=session,
                 )
                 handshake = await connection.perform_handshake(
@@ -364,7 +407,7 @@ class ChiaServer:
             self.log.info(f"{e}")
         except ProtocolError as e:
             if connection is not None:
-                await connection.close()
+                await connection.close(self.invalid_protocol_ban_seconds, WSCloseCode.PROTOCOL_ERROR, e.code)
             if e.code == Err.INVALID_HANDSHAKE:
                 self.log.warning(f"Invalid handshake with peer {target_node}. Maybe the peer is running old software.")
             elif e.code == Err.INCOMPATIBLE_NETWORK_ID:
@@ -375,6 +418,8 @@ class ChiaServer:
                 error_stack = traceback.format_exc()
                 self.log.error(f"Exception {e}, exception Stack: {error_stack}")
         except Exception as e:
+            if connection is not None:
+                await connection.close(self.invalid_protocol_ban_seconds, WSCloseCode.PROTOCOL_ERROR, Err.UNKNOWN)
             error_stack = traceback.format_exc()
             self.log.error(f"Exception {e}, exception Stack: {error_stack}")
 
@@ -383,8 +428,20 @@ class ChiaServer:
 
         return False
 
-    def connection_closed(self, connection: WSChiaConnection):
+    def connection_closed(self, connection: WSChiaConnection, ban_time: int):
+        if is_localhost(connection.peer_host) and ban_time != 0:
+            self.log.warning(f"Trying to ban localhost for {ban_time}, but will not ban")
+            ban_time = 0
         self.log.info(f"Connection closed: {connection.peer_host}, node id: {connection.peer_node_id}")
+        if ban_time > 0:
+            ban_until: float = time.time() + ban_time
+            self.log.warning(f"Banning {connection.peer_host} for {ban_time} seconds")
+            if connection.peer_host in self.banned_peers:
+                if ban_until > self.banned_peers[connection.peer_host]:
+                    self.banned_peers[connection.peer_host] = ban_until
+            else:
+                self.banned_peers[connection.peer_host] = ban_until
+
         if connection.peer_node_id in self.all_connections:
             self.all_connections.pop(connection.peer_node_id)
         if connection.connection_type is not None:
@@ -443,14 +500,26 @@ class ChiaServer:
                         coroutine = f(full_message.data, connection)
                     else:
                         coroutine = f(full_message.data)
-                    response: Optional[Message] = await asyncio.wait_for(coroutine, timeout=300)
+
+                    async def wrapped_coroutine():
+                        try:
+                            result = await coroutine
+                            return result
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            tb = traceback.format_exc()
+                            connection.log.error(f"Exception: {e}, {connection.get_peer_info()}. {tb}")
+                            raise e
+
+                    response: Optional[Message] = await asyncio.wait_for(wrapped_coroutine(), timeout=300)
                     connection.log.debug(
                         f"Time taken to process {message_type} from {connection.peer_node_id} is "
                         f"{time.time() - start_time} seconds"
                     )
 
                     if response is not None:
-                        response_message = Message(response.type, response.data, full_message.id)
+                        response_message = Message(response.type, full_message.id, response.data)
                         await connection.reply_to_request(response_message)
                 except Exception as e:
                     if self.connection_close_task is None:
@@ -459,7 +528,8 @@ class ChiaServer:
                     else:
                         connection.log.debug(f"Exception: {e} while closing connection")
                         pass
-                    await connection.close()
+                    # TODO: actually throw one of the errors from errors.py and pass this to close
+                    await connection.close(self.api_exception_ban_seconds, WSCloseCode.PROTOCOL_ERROR, Err.UNKNOWN)
                 finally:
                     if task_id in self.api_tasks:
                         self.api_tasks.pop(task_id)

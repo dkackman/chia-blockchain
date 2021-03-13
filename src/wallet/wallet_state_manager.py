@@ -1,58 +1,57 @@
+import asyncio
 import base64
 import json
+import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-
-from typing import Dict, Optional, List, Set, Tuple, Callable, Any
-import logging
-import asyncio
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import aiosqlite
+from blspy import AugSchemeMPL, G1Element, PrivateKey
 from chiabip158 import PyBIP158
-from blspy import PrivateKey, G1Element, AugSchemeMPL
 from cryptography.fernet import Fernet
 
-from src.consensus.constants import ConsensusConstants
+from src import __version__
 from src.consensus.block_record import BlockRecord
+from src.consensus.constants import ConsensusConstants
+from src.consensus.find_fork_point import find_fork_point_in_chain
 from src.full_node.weight_proof import WeightProofHandler
-from src.protocols.wallet_protocol import RespondPuzzleSolution, PuzzleSolutionResponse
+from src.protocols.wallet_protocol import PuzzleSolutionResponse, RespondPuzzleSolution
 from src.types.blockchain_format.coin import Coin
-from src.types.header_block import HeaderBlock
+from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.full_block import FullBlock
+from src.types.header_block import HeaderBlock
+from src.types.mempool_inclusion_status import MempoolInclusionStatus
 from src.util.byte_types import hexstr_to_bytes
-from src.util.ints import uint32, uint64, uint128
+from src.util.errors import Err
 from src.util.hash import std_hash
+from src.util.ints import uint32, uint64, uint128
 from src.wallet.block_record import HeaderBlockRecord
 from src.wallet.cc_wallet.cc_wallet import CCWallet
+from src.wallet.derivation_record import DerivationRecord
+from src.wallet.derive_keys import master_sk_to_backup_sk, master_sk_to_wallet_sk
 from src.wallet.key_val_store import KeyValStore
-from src.wallet.settings.user_settings import UserSettings
 from src.wallet.rl_wallet.rl_wallet import RLWallet
+from src.wallet.settings.user_settings import UserSettings
 from src.wallet.trade_manager import TradeManager
 from src.wallet.transaction_record import TransactionRecord
 from src.wallet.util.backup_utils import open_backup_file
 from src.wallet.util.transaction_type import TransactionType
+from src.wallet.util.wallet_types import WalletType
+from src.wallet.wallet import Wallet
 from src.wallet.wallet_action import WalletAction
 from src.wallet.wallet_action_store import WalletActionStore
+from src.wallet.wallet_block_store import WalletBlockStore
 from src.wallet.wallet_blockchain import WalletBlockchain
 from src.wallet.wallet_coin_record import WalletCoinRecord
 from src.wallet.wallet_coin_store import WalletCoinStore
-from src.wallet.wallet_block_store import WalletBlockStore
 from src.wallet.wallet_info import WalletInfo, WalletInfoBackup
 from src.wallet.wallet_puzzle_store import WalletPuzzleStore
 from src.wallet.wallet_sync_store import WalletSyncStore
 from src.wallet.wallet_transaction_store import WalletTransactionStore
 from src.wallet.wallet_user_store import WalletUserStore
-from src.types.mempool_inclusion_status import MempoolInclusionStatus
-from src.util.errors import Err
-from src.wallet.wallet import Wallet
-from src.types.blockchain_format.program import Program
-from src.wallet.derivation_record import DerivationRecord
-from src.wallet.util.wallet_types import WalletType
-from src.consensus.find_fork_point import find_fork_point_in_chain
-from src.wallet.derive_keys import master_sk_to_wallet_sk, master_sk_to_backup_sk
-from src import __version__
 
 
 class WalletStateManager:
@@ -88,11 +87,11 @@ class WalletStateManager:
     trade_manager: TradeManager
     new_wallet: bool
     user_settings: UserSettings
-    blockchain: WalletBlockchain
+    blockchain: Any
     block_store: WalletBlockStore
     coin_store: WalletCoinStore
     sync_store: WalletSyncStore
-    weight_proof_handler: WeightProofHandler
+    weight_proof_handler: Any
 
     @staticmethod
     async def create(
@@ -124,13 +123,18 @@ class WalletStateManager:
         self.trade_manager = await TradeManager.create(self, self.db_connection)
         self.user_settings = await UserSettings.create(self.basic_store)
         self.block_store = await WalletBlockStore.create(self.db_connection)
-        self.blockchain = await WalletBlockchain.create(
-            self.block_store,
-            self.constants,
-            self.coins_of_interest_received,
-            self.reorg_rollback,
-        )
-        self.weight_proof_handler = WeightProofHandler(self.constants, self.blockchain)
+
+        if self.constants.GENESIS_CHALLENGE is not None:
+            self.blockchain = await WalletBlockchain.create(
+                self.block_store,
+                self.constants,
+                self.coins_of_interest_received,
+                self.reorg_rollback,
+            )
+            self.weight_proof_handler = WeightProofHandler(self.constants, self.blockchain)
+        else:
+            self.blockchain = None
+            self.weight_proof_handler = None
 
         self.sync_mode = False
         self.sync_store = await WalletSyncStore.create()
@@ -168,10 +172,21 @@ class WalletStateManager:
 
         async with self.puzzle_store.lock:
             index = await self.puzzle_store.get_last_derivation_path()
-            if index is None or index < self.config["initial_num_public_keys"]:
+            if index is None or index < self.config["initial_num_public_keys"] - 1:
                 await self.create_more_puzzle_hashes(from_zero=True)
 
         return self
+
+    async def initialize_constants(self, config, constants):
+        self.config = config
+        self.constants = constants
+        self.blockchain = await WalletBlockchain.create(
+            self.block_store,
+            self.constants,
+            self.coins_of_interest_received,
+            self.reorg_rollback,
+        )
+        self.weight_proof_handler = WeightProofHandler(self.constants, self.blockchain)
 
     @property
     def peak(self) -> Optional[BlockRecord]:
@@ -322,6 +337,14 @@ class WalletStateManager:
             await self.create_more_puzzle_hashes()
             return record
 
+    async def get_current_derivation_record_for_wallet(self, wallet_id: uint32) -> Optional[DerivationRecord]:
+        async with self.puzzle_store.lock:
+            # If we have no unused public keys, we will create new ones
+            current: Optional[DerivationRecord] = await self.puzzle_store.get_current_derivation_record_for_wallet(
+                wallet_id
+            )
+            return current
+
     def set_callback(self, callback: Callable):
         """
         Callback to be called when the state of the wallet changes.
@@ -368,8 +391,16 @@ class WalletStateManager:
     async def synced(self):
         if self.sync_mode is True:
             return False
-        full_peak = await self.blockchain.get_full_peak()
-        if full_peak is not None and full_peak.foliage_transaction_block.timestamp > int(time.time()) - 10 * 60:
+        peak: Optional[BlockRecord] = self.blockchain.get_peak()
+        if peak is None:
+            return False
+
+        curr = peak
+        while not curr.is_transaction_block and not curr.height == 0:
+            curr = self.blockchain.try_block_record(curr.prev_hash)
+            if curr is None:
+                return False
+        if curr.is_transaction_block and curr.timestamp > int(time.time()) - 7 * 60:
             return True
         return False
 
@@ -488,8 +519,8 @@ class WalletStateManager:
         farmer_rewards = set()
 
         prev = await self.blockchain.get_block_record_from_db(block.prev_hash)
-        # [sub 1] [sub 2] [block 3] [sub 4] [sub 5] [block6]
-        # [block 6] will contain rewards for [sub 1] [sub 2] [block 3]
+        # [block 1] [block 2] [tx block 3] [block 4] [block 5] [tx block 6]
+        # [tx block 6] will contain rewards for [block 1] [block 2] [tx block 3]
         while prev is not None:
             # step 1 find previous block
             if prev.is_transaction_block:
@@ -852,7 +883,8 @@ class WalletStateManager:
         self.tx_pending_changed()
 
     async def close_all_stores(self):
-        self.blockchain.shut_down()
+        if self.blockchain is not None:
+            self.blockchain.shut_down()
         await self.db_connection.close()
 
     async def clear_all_stores(self):

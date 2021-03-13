@@ -1,18 +1,16 @@
 import unicodedata
-
+from hashlib import pbkdf2_hmac
 from secrets import token_bytes
 from sys import platform
-from typing import List, Tuple, Optional
-from hashlib import pbkdf2_hmac
+from typing import List, Optional, Tuple
 
 import keyring as keyring_main
 import pkg_resources
-
 from bitstring import BitArray
 from blspy import AugSchemeMPL, G1Element, PrivateKey
 from keyrings.cryptfile.cryptfile import CryptFileKeyring
-from src.util.hash import std_hash
 
+from src.util.hash import std_hash
 
 MAX_KEYS = 100
 
@@ -26,7 +24,7 @@ elif platform == "darwin":
     keyring.set_keyring(keyring.backends.OS_X.Keyring())
 elif platform == "linux":
     keyring = CryptFileKeyring()
-    keyring.keyring_key = "your keyring password"
+    keyring.keyring_key = "your keyring password"  # type: ignore
 else:
     keyring = keyring_main
 

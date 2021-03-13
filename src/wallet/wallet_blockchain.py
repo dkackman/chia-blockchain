@@ -1,34 +1,30 @@
 import asyncio
 import dataclasses
 import logging
+import multiprocessing
 from concurrent.futures.process import ProcessPoolExecutor
 from enum import Enum
-import multiprocessing
-from typing import Dict, List, Optional, Tuple, Callable, Any, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from src.consensus.block_header_validation import validate_finished_header_block, validate_unfinished_header_block
+from src.consensus.block_record import BlockRecord
 from src.consensus.blockchain_interface import BlockchainInterface
 from src.consensus.constants import ConsensusConstants
-from src.consensus.difficulty_adjustment import (
-    get_next_difficulty,
-    get_next_sub_slot_iters,
-    get_sub_slot_iters_and_difficulty,
-)
+from src.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
+from src.consensus.find_fork_point import find_fork_point_in_chain
 from src.consensus.full_block_to_block_record import block_to_block_record
 from src.consensus.multiprocess_validation import PreValidationResult, pre_validate_blocks_multiprocessing
-from src.types.header_block import HeaderBlock
 from src.types.blockchain_format.sized_bytes import bytes32
-from src.consensus.block_record import BlockRecord
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
+from src.types.header_block import HeaderBlock
 from src.types.unfinished_block import UnfinishedBlock
 from src.types.unfinished_header_block import UnfinishedHeaderBlock
 from src.util.errors import Err, ValidationError
 from src.util.ints import uint32, uint64
-from src.consensus.find_fork_point import find_fork_point_in_chain
-from src.consensus.block_header_validation import validate_finished_header_block, validate_unfinished_header_block
 from src.util.streamable import recurse_jsonify
 from src.wallet.block_record import HeaderBlockRecord
-from src.wallet.wallet_coin_store import WalletCoinStore
 from src.wallet.wallet_block_store import WalletBlockStore
+from src.wallet.wallet_coin_store import WalletCoinStore
 
 log = logging.getLogger(__name__)
 
@@ -142,19 +138,6 @@ class WalletBlockchain(BlockchainInterface):
             return None
         return self.height_to_block_record(self._peak_height)
 
-    async def get_full_peak(self) -> Optional[HeaderBlock]:
-        """ Return a peak transaction block"""
-        if self._peak_height is None:
-            return None
-        curr: Optional[BlockRecord] = self.height_to_block_record(self._peak_height)
-        while curr is not None and not curr.is_transaction_block:
-            curr = self.try_block_record(curr.prev_hash)
-        if curr is None:
-            return None
-        block = await self.block_store.get_header_block(curr.header_hash)
-        assert block is not None
-        return block
-
     def is_child_of_peak(self, block: UnfinishedBlock) -> bool:
         """
         True iff the block is the direct ancestor of the peak
@@ -198,7 +181,9 @@ class WalletBlockchain(BlockchainInterface):
             prev_b: Optional[BlockRecord] = None
         else:
             prev_b = self.block_record(block.prev_header_hash)
-        sub_slot_iters, difficulty = get_sub_slot_iters_and_difficulty(self.constants, block, prev_b, self)
+        sub_slot_iters, difficulty = get_next_sub_slot_iters_and_difficulty(
+            self.constants, len(block.finished_sub_slots) > 0, prev_b, self
+        )
 
         if trusted is False and pre_validation_result is None:
             required_iters, error = validate_finished_header_block(
@@ -245,7 +230,7 @@ class WalletBlockchain(BlockchainInterface):
 
         fork_height: Optional[uint32] = await self._reconsider_peak(block_record, genesis, fork_point_with_peak)
         if fork_height is not None:
-            self.log.info(f"💰 Updated wallet peak to sub height {block_record.height}, weight {block_record.weight}, ")
+            self.log.info(f"💰 Updated wallet peak to height {block_record.height}, weight {block_record.weight}, ")
             return ReceiveBlockResult.NEW_PEAK, None, fork_height
         else:
             return ReceiveBlockResult.ADDED_AS_ORPHAN, None, None
@@ -335,38 +320,22 @@ class WalletBlockchain(BlockchainInterface):
         curr = self.block_record(header_hash)
         if curr.height <= 2:
             return self.constants.DIFFICULTY_STARTING
-        return get_next_difficulty(
-            self.constants,
-            self,
-            header_hash,
-            curr.height,
-            uint64(curr.weight - self.__block_records[curr.prev_hash].weight),
-            curr.deficit,
-            new_slot,
-            curr.sp_total_iters(self.constants),
-        )
+        return get_next_sub_slot_iters_and_difficulty(self.constants, new_slot, curr, self)[1]
 
     def get_next_slot_iters(self, header_hash: bytes32, new_slot: bool) -> uint64:
         assert self.contains_block(header_hash)
         curr = self.block_record(header_hash)
         if curr.height <= 2:
             return self.constants.SUB_SLOT_ITERS_STARTING
-        return get_next_sub_slot_iters(
-            self.constants,
-            self,
-            header_hash,
-            curr.height,
-            curr.sub_slot_iters,
-            curr.deficit,
-            new_slot,
-            curr.sp_total_iters(self.constants),
-        )
+        return get_next_sub_slot_iters_and_difficulty(self.constants, new_slot, curr, self)[0]
 
     async def pre_validate_blocks_multiprocessing(
         self,
         blocks: List[HeaderBlock],
     ) -> Optional[List[PreValidationResult]]:
-        return await pre_validate_blocks_multiprocessing(self.constants, self.constants_json, self, blocks, self.pool)
+        return await pre_validate_blocks_multiprocessing(
+            self.constants, self.constants_json, self, blocks, self.pool, True, True
+        )
 
     def contains_block(self, header_hash: bytes32) -> bool:
         """
@@ -435,8 +404,9 @@ class WalletBlockchain(BlockchainInterface):
 
     def clean_block_records(self):
         """
-        Cleans the cache so that we only maintain relevant blocks. This removes block records that have sub
-        height < peak - BLOCKS_CACHE_SIZE. These blocks are necessary for calculating future difficulty adjustments.
+        Cleans the cache so that we only maintain relevant blocks.
+        This removes block records that have height < peak - BLOCKS_CACHE_SIZE.
+        These blocks are necessary for calculating future difficulty adjustments.
         """
 
         if len(self.__block_records) < self.constants.BLOCKS_CACHE_SIZE:

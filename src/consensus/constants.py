@@ -1,7 +1,8 @@
 import dataclasses
 
 from src.types.blockchain_format.sized_bytes import bytes32
-from src.util.ints import uint64, uint32, uint8, uint128
+from src.util.byte_types import hexstr_to_bytes
+from src.util.ints import uint8, uint32, uint64, uint128
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,6 +60,9 @@ class ConsensusConstants:
     MAX_BLOCK_COUNT_PER_REQUESTS: uint32
     INITIAL_FREEZE_PERIOD: uint32
     BLOCKS_CACHE_SIZE: uint32
+    NETWORK_TYPE: int
+    MAX_GENERATOR_SIZE: uint32
+    MAX_GENERATOR_REF_LIST_SIZE: uint32
 
     def replace(self, **changes):
         return dataclasses.replace(self, **changes)
@@ -70,6 +74,6 @@ class ConsensusConstants:
 
         for k, v in changes.items():
             if isinstance(v, str):
-                changes[k] = bytes.fromhex(v)
+                changes[k] = hexstr_to_bytes(v)
 
         return dataclasses.replace(self, **changes)

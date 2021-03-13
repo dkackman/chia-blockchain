@@ -1,41 +1,34 @@
 import asyncio
 import dataclasses
 import logging
-from concurrent.futures.process import ProcessPoolExecutor
-
-from src.consensus.multiprocess_validation import pre_validate_blocks_multiprocessing, PreValidationResult
-from src.types.header_block import HeaderBlock
-from src.types.weight_proof import SubEpochChallengeSegment
-from src.util.streamable import recurse_jsonify
-from enum import Enum
 import multiprocessing
-from typing import Dict, List, Optional, Tuple, Set
+from concurrent.futures.process import ProcessPoolExecutor
+from enum import Enum
+from typing import Dict, List, Optional, Set, Tuple
 
+from src.consensus.block_body_validation import validate_block_body
+from src.consensus.block_header_validation import validate_finished_header_block, validate_unfinished_header_block
+from src.consensus.block_record import BlockRecord
 from src.consensus.blockchain_interface import BlockchainInterface
 from src.consensus.constants import ConsensusConstants
-from src.consensus.block_body_validation import validate_block_body
+from src.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
+from src.consensus.find_fork_point import find_fork_point_in_chain
+from src.consensus.full_block_to_block_record import block_to_block_record
+from src.consensus.multiprocess_validation import PreValidationResult, pre_validate_blocks_multiprocessing
 from src.full_node.block_store import BlockStore
 from src.full_node.coin_store import CoinStore
-from src.consensus.difficulty_adjustment import (
-    get_next_difficulty,
-    get_next_sub_slot_iters,
-    get_sub_slot_iters_and_difficulty,
-)
-from src.consensus.full_block_to_block_record import block_to_block_record
+from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
+from src.types.blockchain_format.vdf import VDFInfo
 from src.types.end_of_slot_bundle import EndOfSubSlotBundle
 from src.types.full_block import FullBlock
-from src.types.blockchain_format.sized_bytes import bytes32
-from src.consensus.block_record import BlockRecord
-from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
+from src.types.header_block import HeaderBlock
 from src.types.unfinished_block import UnfinishedBlock
-from src.util.errors import Err
-from src.util.ints import uint32, uint64, uint128
-from src.consensus.find_fork_point import find_fork_point_in_chain
-from src.consensus.block_header_validation import (
-    validate_finished_header_block,
-    validate_unfinished_header_block,
-)
 from src.types.unfinished_header_block import UnfinishedHeaderBlock
+from src.types.weight_proof import SubEpochChallengeSegment
+from src.util.errors import Err
+from src.util.ints import uint16, uint32, uint64, uint128
+from src.util.streamable import recurse_jsonify
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +68,8 @@ class Blockchain(BlockchainInterface):
     block_store: BlockStore
     # Used to verify blocks in parallel
     pool: ProcessPoolExecutor
+    # Set holding seen compact proofs, in order to avoid duplicates.
+    _seen_compact_proofs: Set[Tuple[VDFInfo, uint32]]
 
     # Whether blockchain is shut down or not
     _shut_down: bool
@@ -108,6 +103,7 @@ class Blockchain(BlockchainInterface):
         self.constants_json = recurse_jsonify(dataclasses.asdict(self.constants))
         self._shut_down = False
         await self._load_chain_from_store()
+        self._seen_compact_proofs = set()
         return self
 
     def shut_down(self):
@@ -195,7 +191,9 @@ class Blockchain(BlockchainInterface):
                 prev_b: Optional[BlockRecord] = None
             else:
                 prev_b = self.block_record(block.prev_header_hash)
-            sub_slot_iters, difficulty = get_sub_slot_iters_and_difficulty(self.constants, block, prev_b, self)
+            sub_slot_iters, difficulty = get_next_sub_slot_iters_and_difficulty(
+                self.constants, len(block.finished_sub_slots) > 0, prev_b, self
+            )
             required_iters, error = validate_finished_header_block(
                 self.constants,
                 self,
@@ -211,7 +209,7 @@ class Blockchain(BlockchainInterface):
             required_iters = pre_validation_result.required_iters
             assert pre_validation_result.error is None
         assert required_iters is not None
-        error_code = await validate_block_body(
+        error_code, _ = await validate_block_body(
             self.constants,
             self,
             self.block_store,
@@ -345,32 +343,15 @@ class Blockchain(BlockchainInterface):
         curr = self.block_record(header_hash)
         if curr.height <= 2:
             return self.constants.DIFFICULTY_STARTING
-        return get_next_difficulty(
-            self.constants,
-            self,
-            header_hash,
-            curr.height,
-            uint64(curr.weight - self.block_record(curr.prev_hash).weight),
-            curr.deficit,
-            new_slot,
-            curr.sp_total_iters(self.constants),
-        )
+
+        return get_next_sub_slot_iters_and_difficulty(self.constants, new_slot, curr, self)[1]
 
     def get_next_slot_iters(self, header_hash: bytes32, new_slot: bool) -> uint64:
         assert self.contains_block(header_hash)
         curr = self.block_record(header_hash)
         if curr.height <= 2:
             return self.constants.SUB_SLOT_ITERS_STARTING
-        return get_next_sub_slot_iters(
-            self.constants,
-            self,
-            header_hash,
-            curr.height,
-            curr.sub_slot_iters,
-            curr.deficit,
-            new_slot,
-            curr.sp_total_iters(self.constants),
-        )
+        return get_next_sub_slot_iters_and_difficulty(self.constants, new_slot, curr, self)[0]
 
     async def get_sp_and_ip_sub_slots(
         self, header_hash: bytes32
@@ -445,12 +426,12 @@ class Blockchain(BlockchainInterface):
 
     async def validate_unfinished_block(
         self, block: UnfinishedBlock, skip_overflow_ss_validation=True
-    ) -> Tuple[Optional[uint64], Optional[Err]]:
+    ) -> PreValidationResult:
         if (
             not self.contains_block(block.prev_header_hash)
             and not block.prev_header_hash == self.constants.GENESIS_CHALLENGE
         ):
-            return None, Err.INVALID_PREV_BLOCK_HASH
+            return PreValidationResult(uint16(Err.INVALID_PREV_BLOCK_HASH.value), None, None)
 
         unfinished_header_block = UnfinishedHeaderBlock(
             block.finished_sub_slots,
@@ -462,8 +443,8 @@ class Blockchain(BlockchainInterface):
             b"",
         )
         prev_b = self.try_block_record(unfinished_header_block.prev_header_hash)
-        sub_slot_iters, difficulty = get_sub_slot_iters_and_difficulty(
-            self.constants, unfinished_header_block, prev_b, self
+        sub_slot_iters, difficulty = get_next_sub_slot_iters_and_difficulty(
+            self.constants, len(unfinished_header_block.finished_sub_slots) > 0, prev_b, self
         )
         required_iters, error = validate_unfinished_header_block(
             self.constants,
@@ -476,7 +457,7 @@ class Blockchain(BlockchainInterface):
         )
 
         if error is not None:
-            return None, error.code
+            return PreValidationResult(uint16(error.code.value), None, None)
 
         prev_height = (
             -1
@@ -484,7 +465,7 @@ class Blockchain(BlockchainInterface):
             else self.block_record(block.prev_header_hash).height
         )
 
-        error_code = await validate_block_body(
+        error_code, cost_result = await validate_block_body(
             self.constants,
             self,
             self.block_store,
@@ -496,15 +477,16 @@ class Blockchain(BlockchainInterface):
         )
 
         if error_code is not None:
-            return None, error_code
+            return PreValidationResult(uint16(error_code.value), None, None)
 
-        return required_iters, None
+        return PreValidationResult(None, required_iters, cost_result)
 
     async def pre_validate_blocks_multiprocessing(
-        self,
-        blocks: List[FullBlock],
+        self, blocks: List[FullBlock], validate_transactions: bool = True
     ) -> Optional[List[PreValidationResult]]:
-        return await pre_validate_blocks_multiprocessing(self.constants, self.constants_json, self, blocks, self.pool)
+        return await pre_validate_blocks_multiprocessing(
+            self.constants, self.constants_json, self, blocks, self.pool, validate_transactions, True
+        )
 
     def contains_block(self, header_hash: bytes32) -> bool:
         """
@@ -571,8 +553,9 @@ class Blockchain(BlockchainInterface):
 
     def clean_block_records(self):
         """
-        Cleans the cache so that we only maintain relevant blocks. This removes block records that have sub
-        height < peak - BLOCKS_CACHE_SIZE. These blocks are necessary for calculating future difficulty adjustments.
+        Cleans the cache so that we only maintain relevant blocks. This removes
+        block records that have height < peak - BLOCKS_CACHE_SIZE.
+        These blocks are necessary for calculating future difficulty adjustments.
         """
 
         if len(self.__block_records) < self.constants.BLOCKS_CACHE_SIZE:
@@ -589,6 +572,14 @@ class Blockchain(BlockchainInterface):
 
     async def get_header_blocks_in_range(self, start: int, stop: int) -> Dict[bytes32, HeaderBlock]:
         return await self.block_store.get_header_blocks_in_range(start, stop)
+
+    async def get_header_block_by_height(self, height: int, header_hash: bytes32) -> Optional[HeaderBlock]:
+        header_dict: Dict[bytes32, HeaderBlock] = await self.get_header_blocks_in_range(height, height)
+        if len(header_dict) == 0:
+            return None
+        if header_hash not in header_dict:
+            return None
+        return header_dict[header_hash]
 
     async def get_block_record_from_db(self, header_hash: bytes32) -> Optional[BlockRecord]:
         if header_hash in self.__block_records:
@@ -631,3 +622,14 @@ class Blockchain(BlockchainInterface):
         if segments is None:
             return None
         return segments
+
+    # Returns 'True' if the info is already in the set, otherwise returns 'False' and stores it.
+    def seen_compact_proofs(self, vdf_info: VDFInfo, height: uint32) -> bool:
+        pot_tuple = (vdf_info, height)
+        if pot_tuple in self._seen_compact_proofs:
+            return True
+        # Periodically cleanup to keep size small. TODO: make this smarter, like FIFO.
+        if len(self._seen_compact_proofs) > 10000:
+            self._seen_compact_proofs.clear()
+        self._seen_compact_proofs.add(pot_tuple)
+        return False

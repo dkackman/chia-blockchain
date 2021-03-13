@@ -1,17 +1,14 @@
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
-from src.types.end_of_slot_bundle import EndOfSubSlotBundle
 from src.types.blockchain_format.foliage import Foliage
-from src.types.blockchain_format.reward_chain_block import (
-    RewardChainBlock,
-    RewardChainBlockUnfinished,
-)
+from src.types.blockchain_format.reward_chain_block import RewardChainBlock, RewardChainBlockUnfinished
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
 from src.types.blockchain_format.vdf import VDFInfo, VDFProof
-from src.util.ints import uint8, uint64, uint128
-from src.util.streamable import streamable, Streamable
+from src.types.end_of_slot_bundle import EndOfSubSlotBundle
+from src.util.ints import uint8, uint32, uint64, uint128
+from src.util.streamable import Streamable, streamable
 
 """
 Protocol between timelord and full node.
@@ -31,6 +28,7 @@ class NewPeakTimelord(Streamable):
     ]  # If NewPeak is the last slot in epoch, the next slot should include this
     previous_reward_challenges: List[Tuple[bytes32, uint128]]
     last_challenge_sb_or_eos_total_iters: uint128
+    passes_ses_height_but_not_yet_included: bool
 
 
 @dataclass(frozen=True)
@@ -72,3 +70,22 @@ class NewSignagePointVDF(Streamable):
 @streamable
 class NewEndOfSubSlotVDF(Streamable):
     end_of_sub_slot_bundle: EndOfSubSlotBundle
+
+
+@dataclass(frozen=True)
+@streamable
+class RequestCompactProofOfTime:
+    new_proof_of_time: VDFInfo
+    header_hash: bytes32
+    height: uint32
+    field_vdf: uint8
+
+
+@dataclass(frozen=True)
+@streamable
+class RespondCompactProofOfTime:
+    vdf_info: VDFInfo
+    vdf_proof: VDFProof
+    header_hash: bytes32
+    height: uint32
+    field_vdf: uint8

@@ -1,13 +1,13 @@
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import List, Optional
 
 from src.consensus.condition_costs import ConditionCost
-from src.types.condition_opcodes import ConditionOpcode
-from src.types.blockchain_format.program import SerializedProgram
-from src.types.name_puzzle_condition import NPC
-from src.util.ints import uint64, uint16
 from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
-from src.util.streamable import streamable, Streamable
+from src.types.blockchain_format.program import SerializedProgram
+from src.types.condition_opcodes import ConditionOpcode
+from src.types.name_puzzle_condition import NPC
+from src.util.ints import uint16, uint64
+from src.util.streamable import Streamable, streamable
 
 
 @dataclass(frozen=True)
@@ -39,16 +39,16 @@ def calculate_cost_of_program(
                 total_vbyte_cost += len(cvp_list) * ConditionCost.AGG_SIG.value
             elif condition is ConditionOpcode.CREATE_COIN:
                 total_vbyte_cost += len(cvp_list) * ConditionCost.CREATE_COIN.value
-            elif condition is ConditionOpcode.ASSERT_TIME_EXCEEDS:
-                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_TIME_EXCEEDS.value
-            elif condition is ConditionOpcode.ASSERT_BLOCK_AGE_EXCEEDS:
-                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_BLOCK_AGE_EXCEEDS.value
-            elif condition is ConditionOpcode.ASSERT_BLOCK_INDEX_EXCEEDS:
-                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_BLOCK_INDEX_EXCEEDS.value
+            elif condition is ConditionOpcode.ASSERT_SECONDS_NOW_EXCEEDS:
+                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_SECONDS_NOW_EXCEEDS.value
+            elif condition is ConditionOpcode.ASSERT_HEIGHT_AGE_EXCEEDS:
+                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_HEIGHT_AGE_EXCEEDS.value
+            elif condition is ConditionOpcode.ASSERT_HEIGHT_NOW_EXCEEDS:
+                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_HEIGHT_NOW_EXCEEDS.value
             elif condition is ConditionOpcode.ASSERT_MY_COIN_ID:
                 total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_MY_COIN_ID.value
-            elif condition is ConditionOpcode.ASSERT_FEE:
-                total_vbyte_cost += len(cvp_list) * ConditionCost.ASSERT_FEE.value
+            elif condition is ConditionOpcode.RESERVE_FEE:
+                total_vbyte_cost += len(cvp_list) * ConditionCost.RESERVE_FEE.value
             elif condition is ConditionOpcode.CREATE_ANNOUNCEMENT:
                 total_vbyte_cost += len(cvp_list) * ConditionCost.CREATE_ANNOUNCEMENT.value
             elif condition is ConditionOpcode.ASSERT_ANNOUNCEMENT:

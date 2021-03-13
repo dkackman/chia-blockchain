@@ -1,19 +1,19 @@
 import asyncio
 import logging
-
-import pytest
 from pathlib import Path
 
-from src.consensus.block_rewards import calculate_pool_reward, calculate_base_farmer_reward
+import pytest
+
+from src.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
+from src.rpc.rpc_server import start_rpc_server
+from src.rpc.wallet_rpc_api import WalletRpcApi
+from src.rpc.wallet_rpc_client import WalletRpcClient
 from src.simulator.simulator_protocol import FarmNewBlockProtocol
 from src.types.peer_info import PeerInfo
-from src.util.ints import uint16, uint32
-from tests.setup_nodes import setup_simulators_and_wallets, bt
-from tests.time_out_assert import time_out_assert
 from src.util.bech32m import encode_puzzle_hash
-from src.rpc.wallet_rpc_client import WalletRpcClient
-from src.rpc.wallet_rpc_api import WalletRpcApi
-from src.rpc.rpc_server import start_rpc_server
+from src.util.ints import uint16, uint32
+from tests.setup_nodes import bt, setup_simulators_and_wallets
+from tests.time_out_assert import time_out_assert
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class TestWalletRpc:
 
         client = await WalletRpcClient.create("localhost", test_rpc_port, bt.root_path, config)
         try:
-            addr = encode_puzzle_hash(await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash())
+            addr = encode_puzzle_hash(await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(), "xch")
             tx_amount = 15600000
             try:
                 await client.send_transaction("1", 100000000000000001, addr)
@@ -99,7 +99,7 @@ class TestWalletRpc:
             assert (await client.get_wallet_balance("1"))["confirmed_wallet_balance"] == initial_funds
 
             for i in range(0, 5):
-                await client.farm_block(encode_puzzle_hash(ph_2))
+                await client.farm_block(encode_puzzle_hash(ph_2, "xch"))
                 await asyncio.sleep(1)
 
             async def eventual_balance():
@@ -107,7 +107,7 @@ class TestWalletRpc:
 
             await time_out_assert(5, eventual_balance, initial_funds_eventually - tx_amount)
 
-            address = await client.get_next_address("1")
+            address = await client.get_next_address("1", True)
             assert len(address) > 10
 
             transactions = await client.get_transactions("1")

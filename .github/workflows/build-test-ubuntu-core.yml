@@ -1,4 +1,4 @@
-name: Build and test Ubuntu Core
+name: Ubuntu Core Tests
 
 on:
   push:
@@ -12,9 +12,9 @@ on:
 
 jobs:
   build:
-    name: Build and test Ubuntu Core
+    name: Ubuntu Core Tests
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 70
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -65,7 +65,8 @@ jobs:
       with:
         repository: 'Chia-Network/test-cache'
         path: '.chia'
-        ref: '0.10.0'
+        ref: '0.23.0'
+        fetch-depth: 1
 
     - name: Link home directory
       run: |
@@ -96,9 +97,9 @@ jobs:
     - name: Install developer requirements
       run: |
         . ./activate
-        venv/bin/python -m pip install -r requirements-dev.txt
+        venv/bin/python -m pip install pytest pytest-asyncio
 
-    - name: Test blockchain code with pytest
+    - name: Test core code with pytest
       run: |
         . ./activate
-        ./venv/bin/py.test tests/core -s -v --durations 0
+        ./venv/bin/py.test tests/core -v --durations 0

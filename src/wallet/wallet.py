@@ -1,30 +1,31 @@
 import logging
 import time
-from typing import Dict, List, Set, Any, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from blspy import G1Element
 
-from src.types.blockchain_format.coin import Coin
-from src.consensus.cost_calculator import calculate_cost_of_program, CostResult
+from src.consensus.cost_calculator import CostResult, calculate_cost_of_program
 from src.full_node.bundle_tools import best_solution_program
-from src.types.coin_solution import CoinSolution
+from src.types.blockchain_format.coin import Coin
 from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.coin_solution import CoinSolution
 from src.types.spend_bundle import SpendBundle
-from src.util.ints import uint8, uint64, uint32, uint128
+from src.util.ints import uint8, uint32, uint64, uint128
+from src.wallet.derivation_record import DerivationRecord
 from src.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import (
-    puzzle_for_pk,
     DEFAULT_HIDDEN_PUZZLE_HASH,
-    solution_for_conditions,
     calculate_synthetic_secret_key,
+    puzzle_for_pk,
+    solution_for_conditions,
 )
 from src.wallet.puzzles.puzzle_utils import (
-    make_assert_my_coin_id_condition,
-    make_assert_time_exceeds_condition,
-    make_create_coin_condition,
-    make_assert_fee_condition,
-    make_create_announcement,
     make_assert_announcement,
+    make_assert_my_coin_id_condition,
+    make_assert_seconds_now_exceeds_condition,
+    make_create_announcement,
+    make_create_coin_condition,
+    make_reserve_fee_condition,
 )
 from src.wallet.secret_key_store import SecretKeyStore
 from src.wallet.sign_coin_solutions import sign_coin_solutions
@@ -116,6 +117,8 @@ class Wallet:
         addition_amount = 0
 
         for record in unconfirmed_tx:
+            if not record.is_in_mempool():
+                continue
             our_spend = False
             for coin in record.removals:
                 if await self.wallet_state_manager.does_coin_belong_to_wallet(coin, self.id()):
@@ -166,6 +169,17 @@ class Wallet:
         dr = await self.wallet_state_manager.get_unused_derivation_record(self.id())
         return puzzle_for_pk(bytes(dr.pubkey))
 
+    async def get_puzzle_hash(self, new: bool):
+        if new:
+            return await self.get_new_puzzlehash()
+        else:
+            record: Optional[
+                DerivationRecord
+            ] = await self.wallet_state_manager.get_current_derivation_record_for_wallet(self.id())
+            if record is None:
+                return await self.get_new_puzzlehash()
+            return record.puzzle_hash
+
     async def get_new_puzzlehash(self) -> bytes32:
         return (await self.wallet_state_manager.get_unused_derivation_record(self.id())).puzzle_hash
 
@@ -177,18 +191,18 @@ class Wallet:
         announcements=None,
         announcements_to_consume=None,
         fee=0,
-    ):
+    ) -> Program:
         assert fee >= 0
         condition_list = []
         if primaries:
             for primary in primaries:
                 condition_list.append(make_create_coin_condition(primary["puzzlehash"], primary["amount"]))
         if min_time > 0:
-            condition_list.append(make_assert_time_exceeds_condition(min_time))
+            condition_list.append(make_assert_seconds_now_exceeds_condition(min_time))
         if me:
             condition_list.append(make_assert_my_coin_id_condition(me["id"]))
         if fee:
-            condition_list.append(make_assert_fee_condition(fee))
+            condition_list.append(make_reserve_fee_condition(fee))
         if announcements:
             for announcement in announcements:
                 condition_list.append(make_create_announcement(announcement))
@@ -306,8 +320,7 @@ class Wallet:
             else:
                 solution = self.make_solution()
 
-            puzzle_solution_pair = Program.to([puzzle, solution])
-            spends.append(CoinSolution(coin, puzzle_solution_pair))
+            spends.append(CoinSolution(coin, puzzle, solution))
 
         self.log.info(f"Spends is {spends}")
         return spends
@@ -391,7 +404,7 @@ class Wallet:
                 primaries = [{"puzzlehash": newpuzhash, "amount": chia_amount}]
                 solution = self.make_solution(primaries=primaries)
                 output_created = coin
-            list_of_solutions.append(CoinSolution(coin, Program.to([puzzle, solution])))
+            list_of_solutions.append(CoinSolution(coin, puzzle, solution))
 
         await self.hack_populate_secret_keys_for_coin_solutions(list_of_solutions)
         spend_bundle = await sign_coin_solutions(list_of_solutions, self.secret_key_store.secret_key_for_public_key)

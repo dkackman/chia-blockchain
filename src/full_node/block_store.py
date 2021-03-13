@@ -1,14 +1,15 @@
 import logging
-import aiosqlite
 from typing import Dict, List, Optional, Tuple
 
-from src.types.full_block import FullBlock
-from src.types.header_block import HeaderBlock
+import aiosqlite
+
+from src.consensus.block_record import BlockRecord
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
-from src.types.weight_proof import SubEpochSegments, SubEpochChallengeSegment
+from src.types.full_block import FullBlock
+from src.types.header_block import HeaderBlock
+from src.types.weight_proof import SubEpochChallengeSegment, SubEpochSegments
 from src.util.ints import uint32
-from src.consensus.block_record import BlockRecord
 from src.util.lru_cache import LRUCache
 
 log = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ class BlockStore:
         self.db = connection
         await self.db.execute(
             "CREATE TABLE IF NOT EXISTS full_blocks(header_hash text PRIMARY KEY, height bigint,"
-            "  is_block tinyint, block blob)"
+            "  is_block tinyint, is_fully_compactified tinyint, block blob)"
         )
 
         # Block records
@@ -44,6 +45,7 @@ class BlockStore:
         # Height index so we can look up in order of height for sync purposes
         await self.db.execute("CREATE INDEX IF NOT EXISTS full_block_height on full_blocks(height)")
         await self.db.execute("CREATE INDEX IF NOT EXISTS is_block on full_blocks(is_block)")
+        await self.db.execute("CREATE INDEX IF NOT EXISTS is_fully_compactified on full_blocks(is_fully_compactified)")
 
         await self.db.execute("CREATE INDEX IF NOT EXISTS height on block_records(height)")
 
@@ -71,11 +73,12 @@ class BlockStore:
     async def add_full_block(self, block: FullBlock, block_record: BlockRecord) -> None:
         self.block_cache.put(block.header_hash, block)
         cursor_1 = await self.db.execute(
-            "INSERT OR REPLACE INTO full_blocks VALUES(?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO full_blocks VALUES(?, ?, ?, ?, ?)",
             (
                 block.header_hash.hex(),
                 block.height,
                 int(block.is_transaction_block()),
+                int(block.is_fully_compactified()),
                 bytes(block),
             ),
         )
@@ -147,9 +150,9 @@ class BlockStore:
         await cursor.close()
         return [FullBlock.from_bytes(row[0]) for row in rows]
 
-    async def get_header_blocks_by_hash(self, header_hashes: List[bytes32]) -> List[HeaderBlock]:
+    async def get_blocks_by_hash(self, header_hashes: List[bytes32]) -> List[FullBlock]:
         """
-        Returns a list of header blocks, ordered by the same order in which header_hashes are passed in.
+        Returns a list of Full Blocks blocks, ordered by the same order in which header_hashes are passed in.
         Throws an exception if the blocks are not present
         """
 
@@ -161,15 +164,15 @@ class BlockStore:
         cursor = await self.db.execute(formatted_str, header_hashes_db)
         rows = await cursor.fetchall()
         await cursor.close()
-        all_headers: Dict[bytes32, HeaderBlock] = {}
+        all_blocks: Dict[bytes32, FullBlock] = {}
         for row in rows:
             full_block: FullBlock = FullBlock.from_bytes(row[0])
-            all_headers[full_block.header_hash] = full_block.get_block_header()
-        ret: List[HeaderBlock] = []
+            all_blocks[full_block.header_hash] = full_block
+        ret: List[FullBlock] = []
         for hh in header_hashes:
-            if hh not in all_headers:
+            if hh not in all_blocks:
                 raise ValueError(f"Header hash {hh} not in the blockchain")
-            ret.append(all_headers[hh])
+            ret.append(all_blocks[hh])
         return ret
 
     async def get_header_blocks_in_range(
@@ -319,3 +322,23 @@ class BlockStore:
             (header_hash.hex(),),
         )
         await cursor_2.close()
+
+    async def is_fully_compactified(self, header_hash: bytes32) -> Optional[bool]:
+        cursor = await self.db.execute(
+            "SELECT is_fully_compactified from full_blocks WHERE header_hash=?", (header_hash.hex(),)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return bool(row[0])
+
+    async def get_first_not_compactified(self, min_height: int) -> Optional[int]:
+        cursor = await self.db.execute(
+            "SELECT MIN(height) from full_blocks WHERE is_fully_compactified=0 AND height>=?", (min_height,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return int(row[0])

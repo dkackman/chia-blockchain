@@ -2,17 +2,15 @@ import asyncio
 import dataclasses
 import io
 import logging
+import random
 import time
 import traceback
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Callable, Dict, List, Optional, Tuple
 
 from chiavdf import create_discriminant
 
 from src.consensus.constants import ConsensusConstants
-from src.consensus.pot_iterations import (
-    calculate_sp_iters,
-    is_overflow_block,
-)
+from src.consensus.pot_iterations import calculate_sp_iters, is_overflow_block
 from src.protocols import timelord_protocol
 from src.protocols.protocol_message_types import ProtocolMessageTypes
 from src.server.outbound_message import NodeType, make_msg
@@ -21,7 +19,6 @@ from src.timelord.iters_from_block import iters_from_block
 from src.timelord.timelord_state import LastState
 from src.timelord.types import Chain, IterationType, StateType
 from src.types.blockchain_format.classgroup import ClassgroupElement
-from src.types.end_of_slot_bundle import EndOfSubSlotBundle
 from src.types.blockchain_format.reward_chain_block import RewardChainBlock
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.slots import (
@@ -30,16 +27,19 @@ from src.types.blockchain_format.slots import (
     RewardChainSubSlot,
     SubSlotProofs,
 )
-from src.types.blockchain_format.vdf import VDFInfo, VDFProof
-from src.util.ints import uint64, uint8, uint32
+from src.util.genesis_wait import wait_for_genesis_challenge
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
+from src.types.blockchain_format.vdf import VDFInfo, VDFProof
+from src.types.end_of_slot_bundle import EndOfSubSlotBundle
+from src.util.ints import uint8, uint32, uint64
 
 log = logging.getLogger(__name__)
 
 
 class Timelord:
-    def __init__(self, config: Dict, constants: ConsensusConstants):
+    def __init__(self, root_path, config: Dict, constants: ConsensusConstants):
         self.config = config
+        self.root_path = root_path
         self.constants = constants
         self._shut_down = False
         self.free_clients: List[Tuple[str, asyncio.StreamReader, asyncio.StreamWriter]] = []
@@ -61,7 +61,7 @@ class Timelord:
         # Last end of subslot bundle, None if we built a peak on top of it.
         self.new_subslot_end: Optional[EndOfSubSlotBundle] = None
         # Last state received. Can either be a new peak or a new EndOfSubslotBundle.
-        self.last_state: LastState = LastState(self.constants)
+        self.last_state: Optional[LastState] = None
         # Unfinished block info, iters adjusted to the last peak.
         self.unfinished_blocks: List[timelord_protocol.NewUnfinishedBlock] = []
         # Signage points iters, adjusted to the last peak.
@@ -85,22 +85,41 @@ class Timelord:
         self.total_unfinished: int = 0
         self.total_infused: int = 0
         self.state_changed_callback: Optional[Callable] = None
+        self.sanitizer_mode = self.config["sanitizer_mode"]
+        self.pending_bluebox_info: List[timelord_protocol.RequestCompactProofOfTime] = []
+
+    async def delayed_start(self):
+        config, constants = await wait_for_genesis_challenge(self.root_path, self.constants, "timelord")
+        self.config = config
+        self.constants = constants
+        await self.regular_start()
+
+    async def regular_start(self):
+        self.last_state: LastState = LastState(self.constants)
+        if not self.sanitizer_mode:
+            self.main_loop = asyncio.create_task(self._manage_chains())
+        else:
+            self.main_loop = asyncio.create_task(self._manage_discriminant_queue_sanitizer())
+        log.info("Started timelord.")
 
     async def _start(self):
         self.lock: asyncio.Lock = asyncio.Lock()
-        self.main_loop = asyncio.create_task(self._manage_chains())
-
         self.vdf_server = await asyncio.start_server(
             self._handle_client,
             self.config["vdf_server"]["host"],
             self.config["vdf_server"]["port"],
         )
-        log.info("Started timelord.")
+        if self.constants.GENESIS_CHALLENGE is None:
+            asyncio.create_task(self.delayed_start())
+        else:
+            await self.regular_start()
 
     def _close(self):
         self._shut_down = True
         for task in self.process_communication_tasks:
             task.cancel()
+        if self.main_loop is not None:
+            self.main_loop.cancel()
 
     async def _await_closed(self):
         pass
@@ -144,6 +163,7 @@ class Timelord:
             log.error(f"{e}")
 
     def _can_infuse_unfinished_block(self, block: timelord_protocol.NewUnfinishedBlock) -> Optional[uint64]:
+        assert self.last_state is not None
         sub_slot_iters = self.last_state.get_sub_slot_iters()
         difficulty = self.last_state.get_difficulty()
         ip_iters = self.last_state.get_last_ip()
@@ -211,7 +231,7 @@ class Timelord:
         # Adjust all unfinished blocks iterations to the peak.
         new_unfinished_blocks = []
         self.proofs_finished = []
-        for chain in Chain:
+        for chain in [Chain.CHALLENGE_CHAIN, Chain.REWARD_CHAIN, Chain.INFUSED_CHALLENGE_CHAIN]:
             self.iters_to_submit[chain] = []
             self.iters_submitted[chain] = []
         self.iteration_to_proof_type = {}
@@ -236,8 +256,8 @@ class Timelord:
                 count_signage += 1
                 if count_signage == 3:
                     break
-        # TODO: handle the special case when infusion point is the end of subslot.
         left_subslot_iters = sub_slot_iters - ip_iters
+        assert left_subslot_iters > 0
 
         if self.last_state.get_deficit() < self.constants.MIN_BLOCKS_PER_CHALLENGE_BLOCK:
             self.iters_to_submit[Chain.INFUSED_CHALLENGE_CHAIN].append(left_subslot_iters)
@@ -288,7 +308,7 @@ class Timelord:
             )
 
     async def _submit_iterations(self):
-        for chain in Chain:
+        for chain in [Chain.CHALLENGE_CHAIN, Chain.REWARD_CHAIN, Chain.INFUSED_CHALLENGE_CHAIN]:
             if chain in self.allows_iters:
                 # log.info(f"Trying to submit for chain {chain}.")
                 _, _, writer = self.chain_type_to_stream[chain]
@@ -444,11 +464,12 @@ class Timelord:
                     self.unfinished_blocks.remove(block)
                     self.total_infused += 1
                     log.info(f"Generated infusion point for challenge: {challenge} iterations: {iteration}.")
-                    if not self.last_state.can_infuse_block():
-                        log.warning("Too many blocks, cannot infuse, discarding")
-                        # Too many blocks
-                        return
+
                     overflow = is_overflow_block(self.constants, block.reward_chain_block.signage_point_index)
+
+                    if not self.last_state.can_infuse_block(overflow):
+                        log.warning("Too many blocks, or overflow in new epoch, cannot infuse, discarding")
+                        return
 
                     cc_info = dataclasses.replace(cc_info, number_of_iterations=ip_iters)
                     response = timelord_protocol.NewInfusionPointVDF(
@@ -538,10 +559,17 @@ class Timelord:
                     else:
                         last_csb_or_eos = self.last_state.last_challenge_sb_or_eos_total_iters
 
-                    if self.last_state.get_infused_sub_epoch_summary() is not None:
+                    if self.last_state.just_infused_sub_epoch_summary():
                         new_sub_epoch_summary = None
+                        passed_ses_height_but_not_yet_included = False
                     else:
                         new_sub_epoch_summary = block.sub_epoch_summary
+                        if new_reward_chain_block.height % self.constants.SUB_EPOCH_BLOCKS == 0:
+                            passed_ses_height_but_not_yet_included = True
+                        else:
+                            passed_ses_height_but_not_yet_included = (
+                                self.last_state.get_passed_ses_height_but_not_yet_included()
+                            )
 
                     self.new_peak = timelord_protocol.NewPeakTimelord(
                         new_reward_chain_block,
@@ -551,6 +579,7 @@ class Timelord:
                         new_sub_epoch_summary,
                         self.last_state.reward_challenge_cache,
                         last_csb_or_eos,
+                        passed_ses_height_but_not_yet_included,
                     )
                     if self.total_unfinished > 0:
                         infusion_rate = int(self.total_infused / self.total_unfinished * 100)
@@ -677,6 +706,8 @@ class Timelord:
             self.overflow_blocks = []
             self.new_subslot_end = eos_bundle
 
+            await self._handle_subslot_end()
+
     async def _handle_failures(self):
         while len(self.vdf_failures) > 0:
             log.error(f"Vdf clients failed {self.vdf_failures_count} times.")
@@ -733,6 +764,11 @@ class Timelord:
         ip: str,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        # Data specific only when running in bluebox mode.
+        bluebox_iteration: Optional[uint64] = None,
+        header_hash: Optional[bytes32] = None,
+        height: Optional[uint32] = None,
+        field_vdf: Optional[uint8] = None,
     ):
         disc: int = create_discriminant(challenge, self.constants.DISCRIMINANT_SIZE_BITS)
 
@@ -740,12 +776,15 @@ class Timelord:
             # Depending on the flags 'fast_algorithm' and 'sanitizer_mode',
             # the timelord tells the vdf_client what to execute.
             async with self.lock:
-                if self.config["fast_algorithm"]:
-                    # Run n-wesolowski (fast) algorithm.
-                    writer.write(b"N")
+                if self.sanitizer_mode:
+                    writer.write(b"S")
                 else:
-                    # Run two-wesolowski (slow) algorithm.
-                    writer.write(b"T")
+                    if self.config["fast_algorithm"]:
+                        # Run n-wesolowski (fast) algorithm.
+                        writer.write(b"N")
+                    else:
+                        # Run two-wesolowski (slow) algorithm.
+                        writer.write(b"T")
                 await writer.drain()
 
             prefix = str(len(str(disc)))
@@ -774,8 +813,20 @@ class Timelord:
                 return
 
             log.info("Got handshake with VDF client.")
-            async with self.lock:
-                self.allows_iters.append(chain)
+            if not self.sanitizer_mode:
+                async with self.lock:
+                    self.allows_iters.append(chain)
+            else:
+                async with self.lock:
+                    assert chain is Chain.BLUEBOX
+                    assert bluebox_iteration is not None
+                    prefix = str(len(str(bluebox_iteration)))
+                    if len(str(bluebox_iteration)) < 10:
+                        prefix = "0" + prefix
+                    iter_str = prefix + str(bluebox_iteration)
+                    writer.write(iter_str.encode())
+                    await writer.drain()
+
             # Listen to the client until "STOP" is received.
             while True:
                 try:
@@ -831,13 +882,14 @@ class Timelord:
                     # Verifies our own proof just in case
                     form_size = ClassgroupElement.get_size(self.constants)
                     output = ClassgroupElement.from_bytes(y_bytes[:form_size])
-                    time_taken = time.time() - self.chain_start_time[chain]
-                    ips = int(iterations_needed / time_taken * 10) / 10
-                    log.info(
-                        f"Finished PoT chall:{challenge[:10].hex()}.. {iterations_needed}"
-                        f" iters, "
-                        f"Estimated IPS: {ips}, Chain: {chain}"
-                    )
+                    if not self.sanitizer_mode:
+                        time_taken = time.time() - self.chain_start_time[chain]
+                        ips = int(iterations_needed / time_taken * 10) / 10
+                        log.info(
+                            f"Finished PoT chall:{challenge[:10].hex()}.. {iterations_needed}"
+                            f" iters, "
+                            f"Estimated IPS: {ips}, Chain: {chain}"
+                        )
 
                     vdf_info: VDFInfo = VDFInfo(
                         challenge,
@@ -847,11 +899,65 @@ class Timelord:
                     vdf_proof: VDFProof = VDFProof(
                         witness_type,
                         proof_bytes,
+                        self.sanitizer_mode,
                     )
 
                     if not vdf_proof.is_valid(self.constants, initial_form, vdf_info):
                         log.error("Invalid proof of time!")
-                    async with self.lock:
-                        self.proofs_finished.append((chain, vdf_info, vdf_proof))
+                    if not self.sanitizer_mode:
+                        async with self.lock:
+                            self.proofs_finished.append((chain, vdf_info, vdf_proof))
+                    else:
+                        async with self.lock:
+                            writer.write(b"010")
+                            await writer.drain()
+                        assert header_hash is not None
+                        assert field_vdf is not None
+                        assert height is not None
+                        response = timelord_protocol.RespondCompactProofOfTime(
+                            vdf_info, vdf_proof, header_hash, height, field_vdf
+                        )
+                        if self.server is not None:
+                            message = make_msg(ProtocolMessageTypes.respond_compact_vdf_timelord, response)
+                            await self.server.send_to_all([message], NodeType.FULL_NODE)
         except ConnectionResetError as e:
             log.info(f"Connection reset with VDF client {e}")
+
+    async def _manage_discriminant_queue_sanitizer(self):
+        while not self._shut_down:
+            async with self.lock:
+                try:
+                    while len(self.pending_bluebox_info) > 0 and len(self.free_clients) > 0:
+                        # Select randomly the field_vdf we're creating a compact vdf for.
+                        # This is done because CC_SP and CC_IP are more frequent than
+                        # CC_EOS and ICC_EOS. This guarantees everything is picked uniformly.
+                        target_field_vdf = random.randint(1, 4)
+                        info = next(
+                            (info for info in self.pending_bluebox_info if info.field_vdf == target_field_vdf),
+                            None,
+                        )
+                        if info is None:
+                            # Nothing found with target_field_vdf, just pick the first VDFInfo.
+                            info = self.pending_bluebox_info[0]
+                        ip, reader, writer = self.free_clients[0]
+                        self.process_communication_tasks.append(
+                            asyncio.create_task(
+                                self._do_process_communication(
+                                    Chain.BLUEBOX,
+                                    info.new_proof_of_time.challenge,
+                                    ClassgroupElement.get_default_element(),
+                                    ip,
+                                    reader,
+                                    writer,
+                                    info.new_proof_of_time.number_of_iterations,
+                                    info.header_hash,
+                                    info.height,
+                                    info.field_vdf,
+                                )
+                            )
+                        )
+                        self.pending_bluebox_info.remove(info)
+                        self.free_clients = self.free_clients[1:]
+                except Exception as e:
+                    log.error(f"Exception manage discriminant queue: {e}")
+            await asyncio.sleep(0.1)

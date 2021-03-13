@@ -1,21 +1,19 @@
-import logging
 import asyncio
-import src.server.ws_connection as ws  # lgtm [py/import-and-import-from]
+import concurrent
+import logging
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List, Callable, Set
-import concurrent
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from blspy import G1Element
 
+import src.server.ws_connection as ws  # lgtm [py/import-and-import-from]
 from src.consensus.constants import ConsensusConstants
-from src.plotting.plot_tools import (
-    load_plots,
-    PlotInfo,
-    remove_plot_directory as remove_plot_directory_pt,
-    add_plot_directory as add_plot_directory_pt,
-    get_plot_directories as get_plot_directories_pt,
-)
+from src.plotting.plot_tools import PlotInfo
+from src.plotting.plot_tools import add_plot_directory as add_plot_directory_pt
+from src.plotting.plot_tools import get_plot_directories as get_plot_directories_pt
+from src.plotting.plot_tools import load_plots
+from src.plotting.plot_tools import remove_plot_directory as remove_plot_directory_pt
 
 log = logging.getLogger(__name__)
 
@@ -88,9 +86,7 @@ class Harvester:
                     "plot-seed": prover.get_id(),
                     "pool_public_key": plot_info.pool_public_key,
                     "pool_contract_puzzle_hash": plot_info.pool_contract_puzzle_hash,
-                    "farmer_public_key": plot_info.farmer_public_key,
                     "plot_public_key": plot_info.plot_public_key,
-                    "local_sk": plot_info.local_sk,
                     "file_size": plot_info.file_size,
                     "time_modified": plot_info.time_modified,
                 }

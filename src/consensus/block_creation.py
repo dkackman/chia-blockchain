@@ -1,47 +1,36 @@
 import random
 from dataclasses import replace
-from typing import Optional, Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import blspy
-from blspy import G2Element, G1Element
+from blspy import G1Element, G2Element
 from chiabip158 import PyBIP158
 
-from src.consensus.block_rewards import (
-    calculate_pool_reward,
-    calculate_base_farmer_reward,
-)
-from src.consensus.blockchain_interface import BlockchainInterface
-from src.consensus.coinbase import create_pool_coin, create_farmer_coin
-from src.consensus.constants import ConsensusConstants
-from src.full_node.bundle_tools import best_solution_program
-from src.consensus.cost_calculator import calculate_cost_of_program, CostResult
-from src.full_node.signage_point import SignagePoint
 from src.consensus.block_record import BlockRecord
+from src.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
+from src.consensus.blockchain_interface import BlockchainInterface
+from src.consensus.coinbase import create_farmer_coin, create_pool_coin
+from src.consensus.constants import ConsensusConstants
+from src.consensus.cost_calculator import CostResult, calculate_cost_of_program
+from src.full_node.bundle_tools import best_solution_program
+from src.full_node.signage_point import SignagePoint
 from src.types.blockchain_format.coin import Coin, hash_coin_list
-from src.types.end_of_slot_bundle import EndOfSubSlotBundle
-from src.types.blockchain_format.foliage import (
-    Foliage,
-    FoliageTransactionBlock,
-    TransactionsInfo,
-    FoliageBlockData,
-)
-from src.types.full_block import FullBlock
+from src.types.blockchain_format.foliage import Foliage, FoliageBlockData, FoliageTransactionBlock, TransactionsInfo
 from src.types.blockchain_format.pool_target import PoolTarget
 from src.types.blockchain_format.program import SerializedProgram
 from src.types.blockchain_format.proof_of_space import ProofOfSpace
-from src.types.blockchain_format.reward_chain_block import (
-    RewardChainBlockUnfinished,
-    RewardChainBlock,
-)
+from src.types.blockchain_format.reward_chain_block import RewardChainBlock, RewardChainBlockUnfinished
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.blockchain_format.vdf import VDFInfo, VDFProof
+from src.types.end_of_slot_bundle import EndOfSubSlotBundle
+from src.types.full_block import FullBlock
 from src.types.spend_bundle import SpendBundle
 from src.types.unfinished_block import UnfinishedBlock
-from src.types.blockchain_format.vdf import VDFInfo, VDFProof
 from src.util.hash import std_hash
-from src.util.ints import uint128, uint64, uint32, uint8
+from src.util.ints import uint8, uint32, uint64, uint128
 from src.util.merkle_set import MerkleSet
 from src.util.prev_transaction_block import get_prev_transaction_block
-from tests.recursive_replace import recursive_replace
+from src.util.recursive_replace import recursive_replace
 
 
 def create_foliage(
@@ -127,8 +116,7 @@ def create_foliage(
 
     solution_program: Optional[SerializedProgram] = None
     if is_transaction_block:
-        spend_bundle_fees: int = 0
-        aggregate_sig: G2Element = G2Element.infinity()
+        aggregate_sig: G2Element = G2Element()
         cost = uint64(0)
 
         if spend_bundle is not None:
@@ -225,11 +213,12 @@ def create_foliage(
         removals_root = removal_merkle_set.get_root()
 
         generator_hash = solution_program.get_tree_hash() if solution_program is not None else bytes32([0] * 32)
+        generator_refs_hash = bytes32([1] * 32)
         filter_hash: bytes32 = std_hash(encoded)
 
         transactions_info: Optional[TransactionsInfo] = TransactionsInfo(
-            bytes([0] * 32),
             generator_hash,
+            generator_refs_hash,
             aggregate_sig,
             uint64(spend_bundle_fees),
             cost,
@@ -409,6 +398,7 @@ def create_unfinished_block(
         foliage_transaction_block,
         transactions_info,
         solution_program,
+        [],
     )
 
 
@@ -504,6 +494,7 @@ def unfinished_block_to_full_block(
         new_foliage_transaction_block,
         new_tx_info,
         new_generator,
+        [],
     )
     return recursive_replace(
         ret,

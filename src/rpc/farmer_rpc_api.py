@@ -2,7 +2,7 @@ from typing import Callable, Dict, List
 
 from src.farmer.farmer import Farmer
 from src.util.byte_types import hexstr_to_bytes
-from src.util.ws_message import create_payload
+from src.util.ws_message import WsRpcMessage, create_payload_dict
 
 
 class FarmerRpcApi:
@@ -14,29 +14,29 @@ class FarmerRpcApi:
         return {
             "/get_signage_point": self.get_signage_point,
             "/get_signage_points": self.get_signage_points,
+            "/get_reward_targets": self.get_reward_targets,
+            "/set_reward_targets": self.set_reward_targets,
         }
 
-    async def _state_changed(self, change: str, change_data: Dict) -> List[Dict]:
+    async def _state_changed(self, change: str, change_data: Dict) -> List[WsRpcMessage]:
         if change == "new_signage_point":
             sp_hash = change_data["sp_hash"]
             data = await self.get_signage_point({"sp_hash": sp_hash.hex()})
             return [
-                create_payload(
+                create_payload_dict(
                     "new_signage_point",
                     data,
                     self.service_name,
                     "wallet_ui",
-                    string=False,
                 )
             ]
         elif change == "new_farming_info":
             return [
-                create_payload(
+                create_payload_dict(
                     "new_farming_info",
                     change_data,
                     self.service_name,
                     "wallet_ui",
-                    string=False,
                 )
             ]
         return []
@@ -79,3 +79,17 @@ class FarmerRpcApi:
                     }
                 )
         return {"signage_points": result}
+
+    async def get_reward_targets(self, request: Dict) -> Dict:
+        search_for_private_key = request["search_for_private_key"]
+        return self.service.get_reward_targets(search_for_private_key)
+
+    async def set_reward_targets(self, request: Dict) -> Dict:
+        farmer_target, pool_target = None, None
+        if "farmer_target" in request:
+            farmer_target = request["farmer_target"]
+        if "pool_target" in request:
+            pool_target = request["pool_target"]
+
+        self.service.set_reward_targets(farmer_target, pool_target)
+        return {}

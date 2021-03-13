@@ -1,10 +1,10 @@
-from typing import Callable, Optional
 import logging
+from typing import Callable, Optional
+
 from src.protocols import timelord_protocol
-from src.timelord.timelord import Timelord, iters_from_block, Chain, IterationType
+from src.timelord.timelord import Chain, IterationType, Timelord, iters_from_block
 from src.util.api_decorators import api_request
 from src.util.ints import uint64
-
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,11 @@ class TimelordAPI:
 
     @api_request
     async def new_peak_timelord(self, new_peak: timelord_protocol.NewPeakTimelord):
+        if self.timelord.last_state is None:
+            return
         async with self.timelord.lock:
+            if self.timelord.sanitizer_mode:
+                return
             if new_peak.reward_chain_block.weight > self.timelord.last_state.get_weight():
                 log.info("Not skipping peak, don't have. Maybe we are not the fastest timelord")
                 log.info(
@@ -41,7 +45,11 @@ class TimelordAPI:
 
     @api_request
     async def new_unfinished_block(self, new_unfinished_block: timelord_protocol.NewUnfinishedBlock):
+        if self.timelord.last_state is None:
+            return
         async with self.timelord.lock:
+            if self.timelord.sanitizer_mode:
+                return
             try:
                 sp_iters, ip_iters = iters_from_block(
                     self.timelord.constants,
@@ -64,3 +72,11 @@ class TimelordAPI:
                         self.timelord.iters_to_submit[Chain.INFUSED_CHALLENGE_CHAIN].append(new_block_iters)
                     self.timelord.iteration_to_proof_type[new_block_iters] = IterationType.INFUSION_POINT
                     self.timelord.total_unfinished += 1
+
+    @api_request
+    async def request_compact_proof_of_time(self, vdf_info: timelord_protocol.RequestCompactProofOfTime):
+        async with self.timelord.lock:
+            if not self.timelord.sanitizer_mode:
+                return
+            if vdf_info not in self.timelord.pending_bluebox_info:
+                self.timelord.pending_bluebox_info.append(vdf_info)

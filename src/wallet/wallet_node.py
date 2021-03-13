@@ -1,45 +1,46 @@
 import asyncio
 import json
+import logging
+import socket
 import time
 import traceback
 from asyncio import Task
-from typing import Dict, Optional, Tuple, List, Callable, Union, Set
 from pathlib import Path
-import socket
-import logging
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+
 from blspy import PrivateKey
 
-from src.consensus.multiprocess_validation import PreValidationResult
 from src.consensus.block_record import BlockRecord
+from src.consensus.constants import ConsensusConstants
+from src.consensus.multiprocess_validation import PreValidationResult
+from src.protocols import wallet_protocol
 from src.protocols.full_node_protocol import RequestProofOfWeight, RespondProofOfWeight
 from src.protocols.protocol_message_types import ProtocolMessageTypes
 from src.protocols.wallet_protocol import (
-    RespondBlockHeader,
-    RequestAdditions,
-    RespondAdditions,
-    RespondRemovals,
-    RejectRemovalsRequest,
     RejectAdditionsRequest,
+    RejectRemovalsRequest,
+    RequestAdditions,
     RequestHeaderBlocks,
+    RespondAdditions,
+    RespondBlockHeader,
     RespondHeaderBlocks,
+    RespondRemovals,
 )
+from src.server.node_discovery import WalletPeers
+from src.server.outbound_message import Message, NodeType, make_msg
+from src.server.server import ChiaServer
 from src.server.ws_connection import WSChiaConnection
-from src.types.blockchain_format.coin import hash_coin_list, Coin
+from src.types.blockchain_format.coin import Coin, hash_coin_list
+from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.header_block import HeaderBlock
 from src.types.peer_info import PeerInfo
 from src.util.byte_types import hexstr_to_bytes
-from src.protocols import wallet_protocol
-from src.consensus.constants import ConsensusConstants
-from src.server.server import ChiaServer
-from src.server.outbound_message import make_msg, NodeType, Message
-from src.server.node_discovery import WalletPeers
 from src.util.errors import ValidationError, Err
+from src.util.genesis_wait import wait_for_genesis_challenge
 from src.util.ints import uint32, uint128
-from src.types.blockchain_format.sized_bytes import bytes32
-from src.util.merkle_set import (
-    confirm_included_already_hashed,
-    confirm_not_included_already_hashed,
-    MerkleSet,
-)
+from src.util.keychain import Keychain
+from src.util.merkle_set import MerkleSet, confirm_included_already_hashed, confirm_not_included_already_hashed
+from src.util.path import mkdir, path_from_root
 from src.wallet.block_record import HeaderBlockRecord
 from src.wallet.derivation_record import DerivationRecord
 from src.wallet.settings.settings_objects import BackupInitialized
@@ -49,9 +50,6 @@ from src.wallet.util.wallet_types import WalletType
 from src.wallet.wallet_action import WalletAction
 from src.wallet.wallet_blockchain import ReceiveBlockResult
 from src.wallet.wallet_state_manager import WalletStateManager
-from src.types.header_block import HeaderBlock
-from src.util.path import path_from_root, mkdir
-from src.util.keychain import Keychain
 
 
 class WalletNode:
@@ -73,6 +71,7 @@ class WalletNode:
     syncing: bool
     full_node_peer: Optional[PeerInfo]
     peer_task: Optional[asyncio.Task]
+    genesis_initialized: bool
 
     def __init__(
         self,
@@ -111,8 +110,12 @@ class WalletNode:
         self.new_peak_lock: Optional[asyncio.Lock] = None
         self.logged_in_fingerprint: Optional[int] = None
         self.peer_task = None
+        if self.constants.GENESIS_CHALLENGE is None:
+            self.genesis_initialized = False
+        else:
+            self.genesis_initialized = True
 
-    def get_key_for_fingerprint(self, fingerprint):
+    def get_key_for_fingerprint(self, fingerprint: Optional[int]):
         private_keys = self.keychain.get_all_private_keys()
         if len(private_keys) == 0:
             self.log.warning("No keys present. Create keys with the UI, or with the 'chia keys' program.")
@@ -128,13 +131,13 @@ class WalletNode:
             private_key = private_keys[0][0]
         return private_key
 
-    async def _start(
+    async def regular_start(
         self,
         fingerprint: Optional[int] = None,
         new_wallet: bool = False,
         backup_file: Optional[Path] = None,
         skip_backup_import: bool = False,
-    ) -> bool:
+    ):
         private_key = self.get_key_for_fingerprint(fingerprint)
         if private_key is None:
             return False
@@ -142,7 +145,7 @@ class WalletNode:
         db_path_key_suffix = str(private_key.get_g1().get_fingerprint())
         db_path_replaced: str = (
             self.config["database_path"]
-            .replace("CHALLENGE", self.constants.GENESIS_CHALLENGE[:8].hex())
+            .replace("CHALLENGE", self.config["selected_network"])
             .replace("KEY", db_path_key_suffix)
         )
         path = path_from_root(self.root_path, db_path_replaced)
@@ -192,6 +195,31 @@ class WalletNode:
         self.log.info("self.sync_job")
         self.logged_in_fingerprint = fingerprint
         return True
+
+    async def delayed_start(self):
+        self.log.info("delayed_start")
+        config, constants = await wait_for_genesis_challenge(self.root_path, self.constants, "wallet")
+        self.config = config
+        self.constants = constants
+        self.genesis_initialized = True
+        await self.wallet_state_manager.initialize_constants(self.config, self.constants)
+        self.wallet_state_manager.state_changed("sync_changed")
+
+    async def _start(
+        self,
+        fingerprint: Optional[int] = None,
+        new_wallet: bool = False,
+        backup_file: Optional[Path] = None,
+        skip_backup_import: bool = False,
+    ) -> bool:
+        if self.constants.GENESIS_CHALLENGE is None:
+            await self.regular_start(fingerprint, new_wallet, backup_file, True)
+            asyncio.create_task(self.delayed_start())
+            if self.wallet_state_manager is not None:
+                self.wallet_state_manager.state_changed("sync_changed")
+            return True
+        else:
+            return await self.regular_start(fingerprint, new_wallet, backup_file, skip_backup_import)
 
     def _close(self):
         self.log.info("self._close")
@@ -318,6 +346,8 @@ class WalletNode:
             if peer.peer_node_id in peer_ids:
                 continue
             await peer.send_message(msg)
+        if not self.has_full_node() and self.wallet_peers is not None:
+            asyncio.create_task(self.wallet_peers.on_connect(peer))
 
     async def _periodically_check_full_node(self):
         tries = 0
@@ -384,6 +414,7 @@ class WalletNode:
                     if not self.wallet_state_manager.sync_mode:
                         self.wallet_state_manager.blockchain.clean_block_records()
                     self.wallet_state_manager.state_changed("new_block")
+                    self.wallet_state_manager.state_changed("sync_changed")
                 elif result == ReceiveBlockResult.INVALID_BLOCK:
                     self.log.info(f"Invalid block from peer: {peer.get_peer_info()} {error}")
                     await peer.close()
@@ -410,8 +441,7 @@ class WalletNode:
             header_block = response.header_block
 
             if (curr_peak is None and header_block.height < self.constants.WEIGHT_PROOF_RECENT_BLOCKS) or (
-                curr_peak is not None
-                and curr_peak.height > header_block.height - self.constants.WEIGHT_PROOF_RECENT_BLOCKS
+                curr_peak is not None and curr_peak.height > header_block.height - 200
             ):
                 top = header_block
                 blocks = [top]
@@ -441,7 +471,9 @@ class WalletNode:
                 weight_proof = weight_proof_response.wp
                 if self.wallet_state_manager is None:
                     return
-                valid, fork_point = self.wallet_state_manager.weight_proof_handler.validate_weight_proof(weight_proof)
+                valid, fork_point = await self.wallet_state_manager.weight_proof_handler.validate_weight_proof(
+                    weight_proof
+                )
                 if not valid:
                     self.log.error(
                         f"invalid weight proof, num of epochs {len(weight_proof.sub_epochs)}"
@@ -461,6 +493,8 @@ class WalletNode:
         self.sync_event.set()
 
     async def check_new_peak(self):
+        if self.genesis_initialized is False:
+            return
         current_peak: Optional[BlockRecord] = self.wallet_state_manager.blockchain.get_peak()
         if current_peak is None:
             return

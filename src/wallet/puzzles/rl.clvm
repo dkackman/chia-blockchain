@@ -9,11 +9,8 @@
     (defconstant RATE_LIMITED_MODE 1)
     (defconstant AGGREGATE_MODE 2)
     (defconstant CLAWBACK_MODE 3)
-    (defconstant AGGSIG 50)
-    (defconstant CREATE_COIN 51)
-    (defconstant CREATE_ANNOUNCEMENT 60)
-    (defconstant ASSERT_MY_COIN_ID 53)
-    (defconstant ASSERT_BLOCK_AGE_EXCEEDS 56)
+
+    (include condition_codes.clvm)
 
     (defun sha256tree (tree)
         (if (l tree)
@@ -21,7 +18,7 @@
             (sha256 1 tree)))
 
     (defun-inline aggsig-solution-with-key (key)
-        (list AGGSIG key (sha256tree (c mode args)))
+        (list AGG_SIG key (sha256tree (c mode args)))
     )
 
     (defmacro assert items
@@ -68,7 +65,7 @@
     (defun generate-block-age-condition (min_block_time outgoing_amount rate_amount interval_time)
         (assert (>= (* min_block_time rate_amount)
                     (* outgoing_amount interval_time))
-            (list ASSERT_BLOCK_AGE_EXCEEDS min_block_time)))
+            (list ASSERT_HEIGHT_AGE_EXCEEDS min_block_time)))
 
     (defun create-change (my_puzzlehash my_amount outgoing_amount fee)
         (list CREATE_COIN my_puzzlehash (- my_amount (+ outgoing_amount fee))))

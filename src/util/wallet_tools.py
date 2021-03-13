@@ -1,40 +1,35 @@
-from typing import List, Optional, Dict
+from typing import Dict, List, Optional
 
-from blspy import PrivateKey, AugSchemeMPL, G2Element
+from blspy import AugSchemeMPL, G2Element, PrivateKey
 
-from src.types.condition_var_pair import ConditionVarPair
-from src.types.condition_opcodes import ConditionOpcode
-from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.coin import Coin
+from src.types.blockchain_format.program import Program
+from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.coin_solution import CoinSolution
+from src.types.condition_opcodes import ConditionOpcode
+from src.types.condition_var_pair import ConditionVarPair
 from src.types.spend_bundle import SpendBundle
-from src.util.clvm import int_to_bytes, int_from_bytes
-from src.util.condition_tools import (
-    conditions_by_opcode,
-    pkm_pairs_for_conditions_dict,
-    conditions_for_solution,
-)
+from src.util.clvm import int_from_bytes, int_to_bytes
+from src.util.condition_tools import conditions_by_opcode, conditions_for_solution, pkm_pairs_for_conditions_dict
 from src.util.ints import uint32, uint64
+from src.wallet.derive_keys import master_sk_to_wallet_sk
 from src.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import (
+    DEFAULT_HIDDEN_PUZZLE_HASH,
+    calculate_synthetic_secret_key,
     puzzle_for_pk,
     solution_for_conditions,
-    calculate_synthetic_secret_key,
-    DEFAULT_HIDDEN_PUZZLE_HASH,
 )
 from src.wallet.puzzles.puzzle_utils import (
-    make_create_announcement,
-    make_assert_announcement,
-    make_assert_my_coin_id_condition,
-    make_create_coin_condition,
-    make_assert_block_index_exceeds_condition,
-    make_assert_block_age_exceeds_condition,
     make_assert_aggsig_condition,
-    make_assert_time_exceeds_condition,
-    make_assert_fee_condition,
+    make_assert_announcement,
+    make_assert_height_age_exceeds_condition,
+    make_assert_height_now_exceeds_condition,
+    make_assert_my_coin_id_condition,
+    make_assert_seconds_now_exceeds_condition,
+    make_create_announcement,
+    make_create_coin_condition,
+    make_reserve_fee_condition,
 )
-from src.wallet.derive_keys import master_sk_to_wallet_sk
-from src.types.blockchain_format.sized_bytes import bytes32
-
 
 DEFAULT_SEED = b"seed" * 8
 assert len(DEFAULT_SEED) == 32
@@ -59,7 +54,7 @@ class WalletTool:
         self.next_address = uint32(self.next_address + 1)
         return self.next_address
 
-    def get_private_key_for_puzzle_hash(self, puzzle_hash) -> PrivateKey:
+    def get_private_key_for_puzzle_hash(self, puzzle_hash: bytes32) -> PrivateKey:
         if puzzle_hash in self.puzzle_pk_cache:
             child = self.puzzle_pk_cache[puzzle_hash]
             private = master_sk_to_wallet_sk(self.private_key, uint32(child))
@@ -89,7 +84,7 @@ class WalletTool:
         puzzle = self.get_new_puzzle()
         return puzzle.get_tree_hash()
 
-    def sign(self, value, pubkey) -> G2Element:
+    def sign(self, value: bytes, pubkey: bytes) -> G2Element:
         privatekey: PrivateKey = master_sk_to_wallet_sk(self.private_key, self.pubkey_num_lookup[pubkey])
         return AugSchemeMPL.sign(privatekey, value)
 
@@ -106,16 +101,16 @@ class WalletTool:
                     ret.append(make_assert_aggsig_condition(cvp.vars[0]))
                 if cvp.opcode == ConditionOpcode.ASSERT_ANNOUNCEMENT:
                     ret.append(make_assert_announcement(cvp.vars[0]))
-                if cvp.opcode == ConditionOpcode.ASSERT_TIME_EXCEEDS:
-                    ret.append(make_assert_time_exceeds_condition(cvp.vars[0]))
+                if cvp.opcode == ConditionOpcode.ASSERT_SECONDS_NOW_EXCEEDS:
+                    ret.append(make_assert_seconds_now_exceeds_condition(cvp.vars[0]))
                 if cvp.opcode == ConditionOpcode.ASSERT_MY_COIN_ID:
                     ret.append(make_assert_my_coin_id_condition(cvp.vars[0]))
-                if cvp.opcode == ConditionOpcode.ASSERT_BLOCK_INDEX_EXCEEDS:
-                    ret.append(make_assert_block_index_exceeds_condition(cvp.vars[0]))
-                if cvp.opcode == ConditionOpcode.ASSERT_BLOCK_AGE_EXCEEDS:
-                    ret.append(make_assert_block_age_exceeds_condition(cvp.vars[0]))
-                if cvp.opcode == ConditionOpcode.ASSERT_FEE:
-                    ret.append(make_assert_fee_condition(cvp.vars[0]))
+                if cvp.opcode == ConditionOpcode.ASSERT_HEIGHT_NOW_EXCEEDS:
+                    ret.append(make_assert_height_now_exceeds_condition(cvp.vars[0]))
+                if cvp.opcode == ConditionOpcode.ASSERT_HEIGHT_AGE_EXCEEDS:
+                    ret.append(make_assert_height_age_exceeds_condition(cvp.vars[0]))
+                if cvp.opcode == ConditionOpcode.RESERVE_FEE:
+                    ret.append(make_reserve_fee_condition(cvp.vars[0]))
         return solution_for_conditions(Program.to(ret))
 
     def generate_unsigned_transaction(
@@ -125,7 +120,7 @@ class WalletTool:
         coin: Coin,
         condition_dic: Dict[ConditionOpcode, List[ConditionVarPair]],
         fee: int = 0,
-        secret_key=None,
+        secret_key: Optional[PrivateKey] = None,
     ) -> List[CoinSolution]:
         spends = []
         spend_value = coin.amount
@@ -148,9 +143,8 @@ class WalletTool:
             solution = self.make_solution(condition_dic)
         else:
             solution = self.make_solution(condition_dic)
-        puzzle_solution_pair = Program.to([puzzle, solution])
 
-        spends.append(CoinSolution(coin, puzzle_solution_pair))
+        spends.append(CoinSolution(coin, puzzle, solution))
         return spends
 
     def sign_transaction(self, coin_solutions: List[CoinSolution]) -> SpendBundle:
@@ -160,7 +154,7 @@ class WalletTool:
         for coin_solution in coin_solutions:  # type: ignore # noqa
             secret_key = self.get_private_key_for_puzzle_hash(coin_solution.coin.puzzle_hash)
             synthetic_secret_key = calculate_synthetic_secret_key(secret_key, DEFAULT_HIDDEN_PUZZLE_HASH)
-            err, con, cost = conditions_for_solution(coin_solution.solution)
+            err, con, cost = conditions_for_solution(coin_solution.puzzle_reveal, coin_solution.solution)
             if not con:
                 raise ValueError(err)
             conditions_dict = conditions_by_opcode(con)

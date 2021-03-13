@@ -1,20 +1,20 @@
 import asyncio
+import logging
 
 import pytest
-import logging
 from clvm.casts import int_to_bytes
 
 from src.consensus.blockchain import ReceiveBlockResult
 from src.protocols import full_node_protocol
+from src.types.announcement import Announcement
 from src.types.condition_opcodes import ConditionOpcode
 from src.types.condition_var_pair import ConditionVarPair
 from src.types.spend_bundle import SpendBundle
-from src.util.errors import Err, ConsensusError
+from src.util.errors import ConsensusError, Err
 from src.util.ints import uint64
-from tests.core.full_node.test_full_node import connect_and_get_peer
-from tests.setup_nodes import setup_two_nodes, test_constants, bt
 from src.util.wallet_tools import WalletTool
-from src.types.announcement import Announcement
+from tests.core.full_node.test_full_node import connect_and_get_peer
+from tests.setup_nodes import bt, setup_two_nodes, test_constants
 
 BURN_PUZZLE_HASH = b"0" * 32
 
@@ -452,7 +452,9 @@ class TestBlockchainTransactions:
             [],
             seed=b"reorg since genesis",
             farmer_reward_puzzle_hash=coinbase_puzzlehash,
+            guarantee_transaction_block=True,
         )
+
         for block in new_blocks:
             await full_node_api_1.full_node.respond_block(full_node_protocol.RespondBlock(block))
 
@@ -644,7 +646,7 @@ class TestBlockchainTransactions:
                 spend_coin_block_1 = coin
 
         # This condition requires block1 coinbase to be spent after index 10
-        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_BLOCK_INDEX_EXCEEDS, [int_to_bytes(10)])
+        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_HEIGHT_NOW_EXCEEDS, [int_to_bytes(10)])
         block1_dic = {block1_cvp.opcode: [block1_cvp]}
         block1_spend_bundle = wallet_a.generate_signed_transaction(
             1000, receiver_puzzlehash, spend_coin_block_1, block1_dic
@@ -663,7 +665,7 @@ class TestBlockchainTransactions:
         # Try to validate that block at index 10
         res, err, _ = await full_node_1.blockchain.receive_block(invalid_new_blocks[-1])
         assert res == ReceiveBlockResult.INVALID_BLOCK
-        assert err == Err.ASSERT_BLOCK_INDEX_EXCEEDS_FAILED
+        assert err == Err.ASSERT_HEIGHT_NOW_EXCEEDS_FAILED
 
         new_blocks = bt.get_consecutive_blocks(
             1,
@@ -713,7 +715,7 @@ class TestBlockchainTransactions:
         # This condition requires block1 coinbase to be spent after index 11
         # This condition requires block1 coinbase to be spent more than 10 block after it was farmed
         # block index has to be greater than (2 + 9 = 11)
-        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_BLOCK_AGE_EXCEEDS, [int_to_bytes(9)])
+        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_HEIGHT_AGE_EXCEEDS, [int_to_bytes(9)])
         block1_dic = {block1_cvp.opcode: [block1_cvp]}
         block1_spend_bundle = wallet_a.generate_signed_transaction(
             1000, receiver_puzzlehash, spend_coin_block_1, block1_dic
@@ -732,7 +734,7 @@ class TestBlockchainTransactions:
         # Try to validate that block at index 11
         res, err, _ = await full_node_1.blockchain.receive_block(invalid_new_blocks[-1])
         assert res == ReceiveBlockResult.INVALID_BLOCK
-        assert err == Err.ASSERT_BLOCK_AGE_EXCEEDS_FAILED
+        assert err == Err.ASSERT_HEIGHT_AGE_EXCEEDS_FAILED
 
         new_blocks = bt.get_consecutive_blocks(
             1,
@@ -782,7 +784,7 @@ class TestBlockchainTransactions:
 
         # This condition requires block1 coinbase to be spent after 30 seconds from now
         current_time_plus3 = uint64(blocks[-1].foliage_transaction_block.timestamp + 30)
-        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_TIME_EXCEEDS, [int_to_bytes(current_time_plus3)])
+        block1_cvp = ConditionVarPair(ConditionOpcode.ASSERT_SECONDS_NOW_EXCEEDS, [int_to_bytes(current_time_plus3)])
         block1_dic = {block1_cvp.opcode: [block1_cvp]}
         block1_spend_bundle = wallet_a.generate_signed_transaction(
             1000, receiver_puzzlehash, spend_coin_block_1, block1_dic
@@ -802,7 +804,7 @@ class TestBlockchainTransactions:
         # Try to validate that block before 3 sec
         res, err, _ = await full_node_1.blockchain.receive_block(invalid_new_blocks[-1])
         assert res == ReceiveBlockResult.INVALID_BLOCK
-        assert err == Err.ASSERT_TIME_EXCEEDS_FAILED
+        assert err == Err.ASSERT_SECONDS_NOW_EXCEEDS_FAILED
 
         valid_new_blocks = bt.get_consecutive_blocks(
             1,
@@ -842,7 +844,7 @@ class TestBlockchainTransactions:
                 spend_coin_block_1 = coin
 
         # This condition requires fee to be 10 mojo
-        cvp_fee = ConditionVarPair(ConditionOpcode.ASSERT_FEE, [int_to_bytes(10)])
+        cvp_fee = ConditionVarPair(ConditionOpcode.RESERVE_FEE, [int_to_bytes(10)])
         # This spend bundle has 9 mojo as fee
         block1_dic_bad = {cvp_fee.opcode: [cvp_fee]}
         block1_dic_good = {cvp_fee.opcode: [cvp_fee]}
@@ -864,7 +866,7 @@ class TestBlockchainTransactions:
 
         res, err, _ = await full_node_1.blockchain.receive_block(invalid_new_blocks[-1])
         assert res == ReceiveBlockResult.INVALID_BLOCK
-        assert err == Err.ASSERT_FEE_CONDITION_FAILED
+        assert err == Err.RESERVE_FEE_CONDITION_FAILED
 
         valid_new_blocks = bt.get_consecutive_blocks(
             1,

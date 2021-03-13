@@ -6,31 +6,27 @@ from typing import Dict, List, Optional, Tuple
 from blspy import G2Element
 
 from src.types.blockchain_format.coin import Coin
-from src.types.condition_opcodes import ConditionOpcode
 from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.condition_opcodes import ConditionOpcode
 from src.types.spend_bundle import CoinSolution, SpendBundle
 from src.util.ints import uint64
-from src.wallet.cc_wallet.debug_spend_bundle import debug_spend_bundle
 from src.wallet.cc_wallet.cc_utils import (
+    CC_MOD,
     cc_puzzle_for_inner_puzzle,
     cc_puzzle_hash_for_inner_puzzle_hash,
-    spendable_cc_list_from_coin_solution,
     spend_bundle_for_spendable_ccs,
-    CC_MOD,
+    spendable_cc_list_from_coin_solution,
 )
+from src.wallet.cc_wallet.debug_spend_bundle import debug_spend_bundle
 from src.wallet.puzzles.genesis_by_coin_id_with_0 import create_genesis_or_zero_coin_checker
 from src.wallet.puzzles.genesis_by_puzzle_hash_with_0 import create_genesis_puzzle_or_zero_coin_checker
 
+CONDITIONS = dict((k, bytes(v)[0]) for k, v in ConditionOpcode.__members__.items())  # pylint: disable=E1101
 
-CONDITIONS = dict((k, bytes(v)[0]) for k, v in ConditionOpcode.__members__.items())
-
-NULL_SIGNATURE = G2Element.generator() * 0
+NULL_SIGNATURE = G2Element()
 
 ANYONE_CAN_SPEND_PUZZLE = Program.to(1)  # simply return the conditions
-
-NULL_F = Program.from_bytes(bytes.fromhex("ff01ff8080"))  # (q ())
-
 
 PUZZLE_TABLE: Dict[bytes32, Program] = dict((_.get_tree_hash(), _) for _ in [ANYONE_CAN_SPEND_PUZZLE])
 
@@ -88,7 +84,7 @@ def issue_cc_from_farmed_coin(
     # this is just a coincidence... for more complicated puzzles, you'll likely have to do some real work
 
     solution = Program.to(output_conditions)
-    coin_solution = CoinSolution(farmed_coin, Program.to([farmed_puzzle, solution]))
+    coin_solution = CoinSolution(farmed_coin, farmed_puzzle, solution)
     spend_bundle = SpendBundle([coin_solution], NULL_SIGNATURE)
     return genesis_coin_checker, spend_bundle
 
@@ -212,8 +208,7 @@ def test_spend_zero_coin(mod_code: Program, coin_checker_for_farmed_coin):
     wrapped_cc_puzzle_hash = cc_puzzle_hash_for_inner_puzzle_hash(mod_code, genesis_coin_checker, eve_inner_puzzle_hash)
 
     solution = solution_for_pay_to_any([(wrapped_cc_puzzle_hash, 0)])
-    reveal_w_solution = Program.to([ANYONE_CAN_SPEND_PUZZLE, solution])
-    coin_solution = CoinSolution(farmed_coin, reveal_w_solution)
+    coin_solution = CoinSolution(farmed_coin, ANYONE_CAN_SPEND_PUZZLE, solution)
     spendable_cc_list = spendable_cc_list_from_coin_solution(coin_solution, hash_to_puzzle_f)
     assert len(spendable_cc_list) == 1
     zero_cc_spendable = spendable_cc_list[0]

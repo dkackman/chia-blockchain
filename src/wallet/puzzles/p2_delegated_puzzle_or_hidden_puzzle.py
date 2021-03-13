@@ -14,11 +14,9 @@ which proves that it was hidden there in the first place.
 This roughly corresponds to bitcoin's taproot.
 """
 import hashlib
-
 from typing import Union
 
 from blspy import G1Element, PrivateKey
-
 from clvm.casts import int_from_bytes
 
 from src.types.blockchain_format.program import Program
@@ -26,7 +24,6 @@ from src.types.blockchain_format.sized_bytes import bytes32
 
 from .load_clvm import load_clvm
 from .p2_conditions import puzzle_for_conditions
-
 
 DEFAULT_HIDDEN_PUZZLE = Program.from_bytes(bytes.fromhex("ff0980"))
 
@@ -53,7 +50,7 @@ def calculate_synthetic_public_key(public_key: G1Element, hidden_puzzle_hash: by
     return G1Element.from_bytes(r.as_atom())
 
 
-def calculate_synthetic_secret_key(secret_key: PrivateKey, hidden_puzzle_hash: bytes32):
+def calculate_synthetic_secret_key(secret_key: PrivateKey, hidden_puzzle_hash: bytes32) -> PrivateKey:
     secret_exponent = int.from_bytes(bytes(secret_key), "big")
     public_key = secret_key.get_g1()
     synthetic_offset = calculate_synthetic_offset(public_key, hidden_puzzle_hash)
@@ -85,14 +82,12 @@ def solution_for_delegated_puzzle(delegated_puzzle: Program, solution: Program) 
     return Program.to([[], delegated_puzzle, solution])
 
 
-def solution_with_hidden_puzzle(
+def solution_for_hidden_puzzle(
     hidden_public_key: G1Element,
     hidden_puzzle: Program,
     solution_to_hidden_puzzle: Program,
 ) -> Program:
-    synthetic_public_key = calculate_synthetic_public_key(hidden_public_key, hidden_puzzle)
-    puzzle = puzzle_for_synthetic_public_key(synthetic_public_key)
-    return Program.to([puzzle, [hidden_public_key, hidden_puzzle, solution_to_hidden_puzzle]])
+    return Program.to([hidden_public_key, hidden_puzzle, solution_to_hidden_puzzle])
 
 
 def solution_for_conditions(conditions) -> Program:

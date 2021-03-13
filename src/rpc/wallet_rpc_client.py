@@ -1,10 +1,11 @@
-from typing import Dict, List
 from pathlib import Path
+from typing import Dict, List
+
 from src.rpc.rpc_client import RpcClient
-from src.wallet.transaction_record import TransactionRecord
-from src.util.ints import uint64, uint32
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.util.bech32m import decode_puzzle_hash
+from src.util.ints import uint32, uint64
+from src.wallet.transaction_record import TransactionRecord
 
 
 class WalletRpcClient(RpcClient):
@@ -109,8 +110,8 @@ class WalletRpcClient(RpcClient):
             reverted_tx.append(TransactionRecord.from_json_dict(modified_tx))
         return reverted_tx
 
-    async def get_next_address(self, wallet_id: str) -> str:
-        return (await self.fetch("get_next_address", {"wallet_id": wallet_id}))["address"]
+    async def get_next_address(self, wallet_id: str, new_address: bool) -> str:
+        return (await self.fetch("get_next_address", {"wallet_id": wallet_id, "new_address": new_address}))["address"]
 
     async def send_transaction(
         self, wallet_id: str, amount: uint64, address: str, fee: uint64 = uint64(0)
@@ -124,6 +125,9 @@ class WalletRpcClient(RpcClient):
 
     async def create_backup(self, file_path: Path) -> None:
         return await self.fetch("create_backup", {"file_path": str(file_path.resolve())})
+
+    async def get_farmed_amount(self) -> Dict:
+        return await self.fetch("get_farmed_amount", {})
 
 
 # TODO: add APIs for coloured coins and RL wallet

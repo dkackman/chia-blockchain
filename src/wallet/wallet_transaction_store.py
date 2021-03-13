@@ -1,10 +1,12 @@
-from typing import Dict, Optional, List, Set, Any
+from typing import Any, Dict, List, Optional, Set
+
 import aiosqlite
+
 from src.types.blockchain_format.sized_bytes import bytes32
-from src.util.ints import uint32, uint8
-from src.wallet.transaction_record import TransactionRecord
 from src.types.mempool_inclusion_status import MempoolInclusionStatus
 from src.util.errors import Err
+from src.util.ints import uint8, uint32
+from src.wallet.transaction_record import TransactionRecord
 from src.wallet.util.transaction_type import TransactionType
 
 
@@ -282,6 +284,25 @@ class WalletTransactionStore:
 
         return records
 
+    async def get_farming_rewards(self):
+        """
+        Returns the list of all farming rewards.
+        """
+        fee_int = TransactionType.FEE_REWARD.value
+        pool_int = TransactionType.COINBASE_REWARD.value
+        cursor = await self.db_connection.execute(
+            "SELECT * from transaction_record WHERE confirmed=? and (type=? or type=?)", (1, fee_int, pool_int)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        records = []
+
+        for row in rows:
+            record = TransactionRecord.from_bytes(row[0])
+            records.append(record)
+
+        return records
+
     async def get_all_unconfirmed(self) -> List[TransactionRecord]:
         """
         Returns the list of all transaction that have not yet been confirmed.
@@ -364,7 +385,9 @@ class WalletTransactionStore:
             wallet_txs = self.tx_wallet_cache[wallet_id][type]
             txs = []
             for name in wallet_txs:
-                txs.append(self.tx_record_cache[name])
+                tx = await self.get_transaction_record(name)
+                assert tx is not None
+                txs.append(tx)
             return txs
 
         if type is None:

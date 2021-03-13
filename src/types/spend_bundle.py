@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from typing import List
 
-from src.types.blockchain_format.coin import Coin
+from blspy import AugSchemeMPL, G2Element
+
 from src.types.announcement import Announcement
+from src.types.blockchain_format.coin import Coin
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.util.streamable import Streamable, streamable
+
 from .coin_solution import CoinSolution
-from blspy import G2Element, AugSchemeMPL
 
 
 @dataclass(frozen=True)
@@ -25,10 +27,10 @@ class SpendBundle(Streamable):
     @classmethod
     def aggregate(cls, spend_bundles) -> "SpendBundle":
         coin_solutions: List[CoinSolution] = []
-        sigs = []
-        for _ in spend_bundles:
-            coin_solutions += _.coin_solutions
-            sigs.append(_.aggregated_signature)
+        sigs: List[G2Element] = []
+        for bundle in spend_bundles:
+            coin_solutions += bundle.coin_solutions
+            sigs.append(bundle.aggregated_signature)
         aggregated_signature = AugSchemeMPL.aggregate(sigs)
         return cls(coin_solutions, aggregated_signature)
 

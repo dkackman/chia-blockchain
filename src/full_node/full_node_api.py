@@ -1,52 +1,37 @@
 import asyncio
 import dataclasses
 import time
+from typing import Callable, Dict, List, Optional, Tuple
+
+from blspy import AugSchemeMPL, G2Element
+from chiabip158 import PyBIP158
 
 import src.server.ws_connection as ws
-from typing import List, Optional, Tuple, Callable, Dict
-from chiabip158 import PyBIP158
-from blspy import G2Element, AugSchemeMPL
-
 from src.consensus.block_creation import create_unfinished_block
-from src.consensus.pot_iterations import (
-    calculate_ip_iters,
-    calculate_sp_iters,
-    calculate_iterations_quality,
-)
+from src.consensus.block_record import BlockRecord
+from src.consensus.pot_iterations import calculate_ip_iters, calculate_iterations_quality, calculate_sp_iters
 from src.full_node.full_node import FullNode
 from src.full_node.mempool_check_conditions import get_puzzle_and_solution_for_coin
 from src.full_node.signage_point import SignagePoint
-from src.consensus.block_record import BlockRecord
-
-
-from src.protocols import (
-    farmer_protocol,
-    full_node_protocol,
-    timelord_protocol,
-    wallet_protocol,
-    introducer_protocol,
-)
-from src.protocols.full_node_protocol import RejectBlocks, RejectBlock
+from src.protocols import farmer_protocol, full_node_protocol, introducer_protocol, timelord_protocol, wallet_protocol
+from src.protocols.full_node_protocol import RejectBlock, RejectBlocks
 from src.protocols.protocol_message_types import ProtocolMessageTypes
-from src.protocols.wallet_protocol import RejectHeaderRequest, PuzzleSolutionResponse, RejectHeaderBlocks
+from src.protocols.wallet_protocol import PuzzleSolutionResponse, RejectHeaderBlocks, RejectHeaderRequest
 from src.server.outbound_message import Message, NodeType, make_msg
 from src.types.blockchain_format.coin import Coin, hash_coin_list
-
-from src.types.end_of_slot_bundle import EndOfSubSlotBundle
-from src.types.full_block import FullBlock
-from src.types.header_block import HeaderBlock
-
-from src.types.mempool_inclusion_status import MempoolInclusionStatus
-from src.types.mempool_item import MempoolItem
 from src.types.blockchain_format.pool_target import PoolTarget
 from src.types.blockchain_format.program import Program
 from src.types.blockchain_format.sized_bytes import bytes32
+from src.types.end_of_slot_bundle import EndOfSubSlotBundle
+from src.types.full_block import FullBlock
+from src.types.header_block import HeaderBlock
+from src.types.mempool_inclusion_status import MempoolInclusionStatus
+from src.types.mempool_item import MempoolItem
+from src.types.peer_info import PeerInfo
 from src.types.spend_bundle import SpendBundle
 from src.types.unfinished_block import UnfinishedBlock
 from src.util.api_decorators import api_request, peer_required
-from src.util.errors import Err
-from src.util.ints import uint64, uint128, uint8, uint32
-from src.types.peer_info import PeerInfo
+from src.util.ints import uint8, uint32, uint64, uint128
 from src.util.merkle_set import MerkleSet
 
 
@@ -157,54 +142,8 @@ class FullNodeAPI:
         Receives a full transaction from peer.
         If tx is added to mempool, send tx_id to others. (new_transaction)
         """
-        # Ignore if syncing
-        if self.full_node.sync_store.get_sync_mode():
-            return None
-        if not test and not (await self.full_node.synced()):
-            return None
-        peak_height = self.full_node.blockchain.get_peak_height()
-        if peak_height is None or peak_height <= self.full_node.constants.INITIAL_FREEZE_PERIOD:
-            return None
-
-        # Ignore if we have already added this transaction
         spend_name = tx.transaction.name()
-        if self.full_node.mempool_manager.get_spendbundle(spend_name) is not None:
-            return None
-
-        # This is important because we might not have added the spend bundle, but we are about to add it, so it
-        # prevents double processing
-        if self.full_node.mempool_manager.seen(spend_name):
-            return None
-        # Adds it to seen so we don't double process
-        self.full_node.mempool_manager.add_and_maybe_pop_seen(spend_name)
-
-        # Do the expensive pre-validation outside the lock
-        cost_result = await self.full_node.mempool_manager.pre_validate_spendbundle(tx.transaction)
-
-        async with self.full_node.blockchain.lock:
-            # Check for unnecessary addition
-            if self.full_node.mempool_manager.get_spendbundle(spend_name) is not None:
-                self.full_node.mempool_manager.remove_seen(spend_name)
-                return None
-            # Performs DB operations within the lock
-            cost, status, error = await self.full_node.mempool_manager.add_spendbundle(
-                tx.transaction, cost_result, spend_name
-            )
-            if status == MempoolInclusionStatus.SUCCESS:
-                fees = tx.transaction.fees()
-                self.log.debug(f"Added transaction to mempool: {spend_name} cost: {cost} fees {fees}")
-                assert fees >= 0
-                assert cost is not None
-                new_tx = full_node_protocol.NewTransaction(
-                    spend_name,
-                    cost,
-                    uint64(tx.transaction.fees()),
-                )
-                message = make_msg(ProtocolMessageTypes.new_transaction, new_tx)
-                await self.server.send_to_all_except([message], NodeType.FULL_NODE, peer.peer_node_id)
-            else:
-                self.full_node.mempool_manager.remove_seen(spend_name)
-                self.log.warning(f"Was not able to add transaction with id {spend_name}, {status} error: {error}")
+        await self.full_node.respond_transaction(tx.transaction, spend_name, peer, test)
         return None
 
     @api_request
@@ -404,7 +343,7 @@ class FullNodeAPI:
                 num_non_empty_sub_slots_seen = 0
                 for _ in range(30):
                     if num_non_empty_sub_slots_seen >= 3:
-                        self.log.debug("Diverged from peer. Don't have the same sub-blocks")
+                        self.log.debug("Diverged from peer. Don't have the same blocks")
                         return None
                     # If this is an end of sub slot, and we don't have the prev, request the prev instead
                     # We want to catch up to the latest slot so we can receive signage points
@@ -696,7 +635,7 @@ class FullNodeAPI:
                     return request.challenge_chain_sp_signature
                 elif to_sign == request.reward_chain_sp:
                     return request.reward_chain_sp_signature
-                return G2Element.infinity()
+                return G2Element()
 
             def get_pool_sig(_1, _2) -> Optional[G2Element]:
                 return request.pool_signature
@@ -739,9 +678,14 @@ class FullNodeAPI:
                     return None
 
             try:
-                finished_sub_slots: List[EndOfSubSlotBundle] = self.full_node.full_node_store.get_finished_sub_slots(
-                    prev_b, self.full_node.blockchain, cc_challenge_hash
+                finished_sub_slots: Optional[
+                    List[EndOfSubSlotBundle]
+                ] = self.full_node.full_node_store.get_finished_sub_slots(
+                    self.full_node.blockchain, prev_b, cc_challenge_hash
                 )
+                if finished_sub_slots is None:
+                    return None
+
                 if (
                     len(finished_sub_slots) > 0
                     and pos_sub_slot is not None
@@ -793,6 +737,16 @@ class FullNodeAPI:
                 required_iters,
             )
 
+            # The block's timestamp must be greater than the previous transaction block's timestamp
+            timestamp = uint64(int(time.time()))
+            curr: Optional[BlockRecord] = prev_b
+            while curr is not None and not curr.is_transaction_block and curr.height != 0:
+                curr = self.full_node.blockchain.try_block_record(curr.prev_hash)
+            if curr is not None:
+                assert curr.timestamp is not None
+                if timestamp <= curr.timestamp:
+                    timestamp = uint64(int(curr.timestamp + 1))
+
             self.log.info("Starting to make the unfinished block")
             unfinished_block: UnfinishedBlock = create_unfinished_block(
                 self.full_node.constants,
@@ -808,7 +762,7 @@ class FullNodeAPI:
                 get_plot_sig,
                 get_pool_sig,
                 sp_vdfs,
-                uint64(int(time.time())),
+                timestamp,
                 self.full_node.blockchain,
                 b"",
                 spend_bundle,
@@ -881,13 +835,16 @@ class FullNodeAPI:
         return None
 
     # TIMELORD PROTOCOL
+    @peer_required
     @api_request
-    async def new_infusion_point_vdf(self, request: timelord_protocol.NewInfusionPointVDF) -> Optional[Message]:
+    async def new_infusion_point_vdf(
+        self, request: timelord_protocol.NewInfusionPointVDF, peer: ws.WSChiaConnection
+    ) -> Optional[Message]:
         if self.full_node.sync_store.get_sync_mode():
             return None
         # Lookup unfinished blocks
         async with self.full_node.timelord_lock:
-            return await self.full_node.new_infusion_point_vdf(request)
+            return await self.full_node.new_infusion_point_vdf(request, peer)
 
     @peer_required
     @api_request
@@ -927,7 +884,7 @@ class FullNodeAPI:
                 f"{request.end_of_sub_slot_bundle.challenge_chain.challenge_chain_end_of_slot_vdf.challenge}. "
                 f"Re-sending new-peak to timelord"
             )
-            await self.full_node.send_peak_to_timelords()
+            await self.full_node.send_peak_to_timelords(peer=peer)
             return None
         else:
             return msg
@@ -1061,56 +1018,12 @@ class FullNodeAPI:
 
     @api_request
     async def send_transaction(self, request: wallet_protocol.SendTransaction) -> Optional[Message]:
-        # Ignore if syncing
-        if self.full_node.sync_store.get_sync_mode():
-            return None
-        if not (await self.full_node.synced()):
-            return None
-        peak_height = self.full_node.blockchain.get_peak_height()
-        if peak_height is None or peak_height <= self.full_node.constants.INITIAL_FREEZE_PERIOD:
-            return None
         spend_name = request.transaction.name()
-        if self.full_node.mempool_manager.seen(spend_name):
-            return None
-        self.full_node.mempool_manager.add_and_maybe_pop_seen(spend_name)
-        self.log.debug(f"Processing transaction: {spend_name}")
-        # Ignore if syncing
-        if self.full_node.sync_store.get_sync_mode():
-            status = MempoolInclusionStatus.FAILED
-            error: Optional[Err] = Err.NO_TRANSACTIONS_WHILE_SYNCING
-        else:
-            cost_result = await self.full_node.mempool_manager.pre_validate_spendbundle(request.transaction)
-
-            async with self.full_node.blockchain.lock:
-                cost, status, error = await self.full_node.mempool_manager.add_spendbundle(
-                    request.transaction, cost_result, spend_name
-                )
-                if status == MempoolInclusionStatus.SUCCESS:
-                    self.log.debug(f"Added transaction to mempool: {spend_name}")
-                    # Only broadcast successful transactions, not pending ones. Otherwise it's a DOS
-                    # vector.
-                    mempool_item = self.full_node.mempool_manager.get_mempool_item(spend_name)
-                    assert mempool_item is not None
-                    fees = mempool_item.fee
-                    assert fees >= 0
-                    assert cost is not None
-                    new_tx = full_node_protocol.NewTransaction(
-                        spend_name,
-                        cost,
-                        uint64(fees),
-                    )
-                    msg = make_msg(ProtocolMessageTypes.new_transaction, new_tx)
-                    await self.full_node.server.send_to_all([msg], NodeType.FULL_NODE)
-                else:
-                    self.log.warning(
-                        f"Wasn't able to add transaction with id {spend_name}, " f"status {status} error: {error}"
-                    )
-
+        status, error = await self.full_node.respond_transaction(request.transaction, spend_name)
         error_name = error.name if error is not None else None
         if status == MempoolInclusionStatus.SUCCESS:
             response = wallet_protocol.TransactionAck(spend_name, uint8(status.value), error_name)
         else:
-            self.full_node.mempool_manager.remove_seen(spend_name)
             # If if failed/pending, but it previously succeeded (in mempool), this is idempotence, return SUCCESS
             if self.full_node.mempool_manager.get_spendbundle(spend_name) is not None:
                 response = wallet_protocol.TransactionAck(spend_name, uint8(MempoolInclusionStatus.SUCCESS.value), None)
@@ -1161,10 +1074,45 @@ class FullNodeAPI:
                 return msg
             header_hashes.append(self.full_node.blockchain.height_to_hash(uint32(i)))
 
-        header_blocks = await self.full_node.block_store.get_header_blocks_by_hash(header_hashes)
+        blocks: List[FullBlock] = await self.full_node.block_store.get_blocks_by_hash(header_hashes)
+        header_blocks = []
+        for block in blocks:
+            added_coins_records = await self.full_node.coin_store.get_tx_coins_added_at_height(block.height)
+            removed_coins_records = await self.full_node.coin_store.get_coins_removed_at_height(block.height)
+            added_coins = [record.coin for record in added_coins_records]
+            removal_names = [record.coin.name() for record in removed_coins_records]
+            header_block = block.get_block_header(added_coins, removal_names)
+            header_blocks.append(header_block)
 
         msg = make_msg(
             ProtocolMessageTypes.respond_header_blocks,
             wallet_protocol.RespondHeaderBlocks(request.start_height, request.end_height, header_blocks),
         )
         return msg
+
+    @api_request
+    async def respond_compact_vdf_timelord(self, request: timelord_protocol.RespondCompactProofOfTime):
+        if self.full_node.sync_store.get_sync_mode():
+            return None
+        await self.full_node.respond_compact_vdf_timelord(request)
+
+    @peer_required
+    @api_request
+    async def new_compact_vdf(self, request: full_node_protocol.NewCompactVDF, peer: ws.WSChiaConnection):
+        if self.full_node.sync_store.get_sync_mode():
+            return None
+        await self.full_node.new_compact_vdf(request, peer)
+
+    @peer_required
+    @api_request
+    async def request_compact_vdf(self, request: full_node_protocol.RequestCompactVDF, peer: ws.WSChiaConnection):
+        if self.full_node.sync_store.get_sync_mode():
+            return None
+        await self.full_node.request_compact_vdf(request, peer)
+
+    @peer_required
+    @api_request
+    async def respond_compact_vdf(self, request: full_node_protocol.RespondCompactVDF, peer: ws.WSChiaConnection):
+        if self.full_node.sync_store.get_sync_mode():
+            return None
+        await self.full_node.respond_compact_vdf(request, peer)

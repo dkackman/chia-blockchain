@@ -15,9 +15,7 @@ This roughly corresponds to bitcoin's graftroot.
 from src.types.blockchain_format.program import Program
 
 from . import p2_conditions
-
 from .load_clvm import load_clvm
-
 
 MOD = load_clvm("p2_delegated_puzzle.clvm")
 
@@ -32,4 +30,4 @@ def solution_for_conditions(conditions) -> Program:
 
 
 def solution_for_delegated_puzzle(delegated_puzzle: Program, delegated_solution: Program) -> Program:
-    return Program.to([delegated_puzzle, delegated_solution])
+    return delegated_puzzle.to([delegated_puzzle, delegated_solution])

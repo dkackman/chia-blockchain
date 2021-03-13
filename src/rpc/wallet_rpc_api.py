@@ -2,35 +2,32 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-
-from typing import List, Optional, Tuple, Dict, Callable
+from typing import Callable, Dict, List, Optional, Tuple
 
 from blspy import PrivateKey
 
-from src.protocols.protocol_message_types import ProtocolMessageTypes
-from src.util.byte_types import hexstr_to_bytes
-from src.util.bech32m import encode_puzzle_hash, decode_puzzle_hash
-from src.util.keychain import (
-    generate_mnemonic,
-    bytes_to_mnemonic,
-)
-from src.util.path import path_from_root
-from src.util.ws_message import create_payload
-
 from src.cmds.init import check_keys
+from src.consensus.block_rewards import calculate_base_farmer_reward
+from src.protocols.protocol_message_types import ProtocolMessageTypes
 from src.server.outbound_message import NodeType, make_msg
 from src.simulator.simulator_protocol import FarmNewBlockProtocol
-from src.util.ints import uint64, uint32
 from src.types.blockchain_format.sized_bytes import bytes32
-from src.wallet.trade_record import TradeRecord
-from src.wallet.util.backup_utils import get_backup_info, download_backup, upload_backup
-from src.wallet.util.trade_utils import trade_record_to_dict
-from src.wallet.util.wallet_types import WalletType
-from src.wallet.rl_wallet.rl_wallet import RLWallet
+from src.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
+from src.util.byte_types import hexstr_to_bytes
+from src.util.ints import uint32, uint64
+from src.util.keychain import bytes_to_mnemonic, generate_mnemonic
+from src.util.path import path_from_root
+from src.util.ws_message import WsRpcMessage, create_payload_dict
 from src.wallet.cc_wallet.cc_wallet import CCWallet
+from src.wallet.rl_wallet.rl_wallet import RLWallet
+from src.wallet.trade_record import TradeRecord
+from src.wallet.transaction_record import TransactionRecord
+from src.wallet.util.backup_utils import download_backup, get_backup_info, upload_backup
+from src.wallet.util.trade_utils import trade_record_to_dict
+from src.wallet.util.transaction_type import TransactionType
+from src.wallet.util.wallet_types import WalletType
 from src.wallet.wallet_info import WalletInfo
 from src.wallet.wallet_node import WalletNode
-from src.wallet.transaction_record import TransactionRecord
 
 # Timeout for response from wallet/full node for sending a transaction
 TIMEOUT = 30
@@ -58,6 +55,8 @@ class WalletRpcApi:
             "/get_sync_status": self.get_sync_status,
             "/get_height_info": self.get_height_info,
             "/farm_block": self.farm_block,  # Only when node simulator is running
+            "/get_initial_freeze_period": self.get_initial_freeze_period,
+            "/get_network_info": self.get_network_info,
             # Wallet management
             "/get_wallets": self.get_wallets,
             "/create_new_wallet": self.create_new_wallet,
@@ -68,6 +67,8 @@ class WalletRpcApi:
             "/get_next_address": self.get_next_address,
             "/send_transaction": self.send_transaction,
             "/create_backup": self.create_backup,
+            "/get_transaction_count": self.get_transaction_count,
+            "/get_farmed_amount": self.get_farmed_amount,
             # Coloured coins and trading
             "/cc_set_name": self.cc_set_name,
             "/cc_get_name": self.cc_get_name,
@@ -83,11 +84,9 @@ class WalletRpcApi:
             "/rl_set_user_info": self.rl_set_user_info,
             "/send_clawback_transaction:": self.send_clawback_transaction,
             "/add_rate_limited_funds:": self.add_rate_limited_funds,
-            "/get_transaction_count": self.get_transaction_count,
-            "/get_initial_freeze_period": self.get_initial_freeze_period,
         }
 
-    async def _state_changed(self, *args) -> List[str]:
+    async def _state_changed(self, *args) -> List[WsRpcMessage]:
         """
         Called by the WalletNode or WalletStateManager when something has changed in the wallet. This
         gives us an opportunity to send notifications to all connected clients via WebSocket.
@@ -102,7 +101,7 @@ class WalletRpcApi:
             data["wallet_id"] = args[1]
         if args[2] is not None:
             data["additional_data"] = args[2]
-        return [create_payload("state_changed", data, "chia_wallet", "wallet_ui", string=False)]
+        return [create_payload_dict("state_changed", data, "chia_wallet", "wallet_ui")]
 
     async def _stop_wallet(self):
         """
@@ -130,6 +129,7 @@ class WalletRpcApi:
         log_in_type = request["type"]
         recovery_host = request["host"]
         testing = False
+
         if "testing" in self.service.config and self.service.config["testing"] is True:
             testing = True
         if log_in_type == "skip":
@@ -256,19 +256,30 @@ class WalletRpcApi:
     ##########################################################################################
 
     async def get_sync_status(self, request: Dict):
-        assert self.service.wallet_state_manager is not None
-        syncing = self.service.wallet_state_manager.sync_mode
-        synced = await self.service.wallet_state_manager.synced()
-        return {"synced": synced, "syncing": syncing}
+        genesis_initialized = self.service.genesis_initialized
+        if self.service.genesis_initialized:
+            assert self.service.wallet_state_manager is not None
+            syncing = self.service.wallet_state_manager.sync_mode
+            synced = await self.service.wallet_state_manager.synced()
+            return {"synced": synced, "syncing": syncing, "genesis_initialized": genesis_initialized}
+        else:
+            return {"synced": False, "syncing": False, "genesis_initialized": genesis_initialized}
 
     async def get_height_info(self, request: Dict):
         assert self.service.wallet_state_manager is not None
-
+        if self.service.genesis_initialized is False:
+            return {"height": 0}
         peak = self.service.wallet_state_manager.peak
         if peak is None:
             return {"height": 0}
         else:
             return {"height": peak.height}
+
+    async def get_network_info(self, request: Dict):
+        assert self.service.wallet_state_manager is not None
+        network_name = self.service.config["selected_network"]
+        address_prefix = self.service.config["network_overrides"]["config"][network_name]["address_prefix"]
+        return {"network_name": network_name, "network_prefix": address_prefix}
 
     async def farm_block(self, request):
         raw_puzzle_hash = decode_puzzle_hash(request["address"])
@@ -367,6 +378,17 @@ class WalletRpcApi:
         assert self.service.wallet_state_manager is not None
         wallet_id = uint32(int(request["wallet_id"]))
         wallet = self.service.wallet_state_manager.wallets[wallet_id]
+        if self.service.genesis_initialized is False:
+            wallet_balance = {
+                "wallet_id": wallet_id,
+                "confirmed_wallet_balance": 0,
+                "unconfirmed_wallet_balance": 0,
+                "spendable_balance": 0,
+                "pending_change": 0,
+                "max_send_amount": 0,
+            }
+            return {"wallet_balance": wallet_balance}
+
         unspent_records = await self.service.wallet_state_manager.coin_store.get_unspent_coins_for_wallet(wallet_id)
         balance = await wallet.get_confirmed_balance(unspent_records)
         pending_balance = await wallet.get_unconfirmed_balance(unspent_records)
@@ -412,10 +434,11 @@ class WalletRpcApi:
 
         transactions = await self.service.wallet_state_manager.tx_store.get_transactions_between(wallet_id, start, end)
         formatted_transactions = []
-
+        selected = self.service.config["selected_network"]
+        prefix = self.service.config["network_overrides"]["config"][selected]["address_prefix"]
         for tx in transactions:
             formatted = tx.to_json_dict()
-            formatted["to_address"] = encode_puzzle_hash(tx.to_puzzle_hash)
+            formatted["to_address"] = encode_puzzle_hash(tx.to_puzzle_hash, prefix)
             formatted_transactions.append(formatted)
 
         return {
@@ -433,15 +456,20 @@ class WalletRpcApi:
         """
         assert self.service.wallet_state_manager is not None
 
+        if request["new_address"] is True:
+            create_new = True
+        else:
+            create_new = False
         wallet_id = uint32(int(request["wallet_id"]))
         wallet = self.service.wallet_state_manager.wallets[wallet_id]
-
+        selected = self.service.config["selected_network"]
+        prefix = self.service.config["network_overrides"]["config"][selected]["address_prefix"]
         if wallet.type() == WalletType.STANDARD_WALLET:
-            raw_puzzle_hash = await wallet.get_new_puzzlehash()
-            address = encode_puzzle_hash(raw_puzzle_hash)
+            raw_puzzle_hash = await wallet.get_puzzle_hash(create_new)
+            address = encode_puzzle_hash(raw_puzzle_hash, prefix)
         elif wallet.type() == WalletType.COLOURED_COIN:
-            raw_puzzle_hash = await wallet.get_new_inner_hash()
-            address = encode_puzzle_hash(raw_puzzle_hash)
+            raw_puzzle_hash = await wallet.get_puzzle_hash(create_new)
+            address = encode_puzzle_hash(raw_puzzle_hash, prefix)
         else:
             raise ValueError(f"Wallet type {wallet.type()} cannot create puzzle hashes")
 
@@ -677,3 +705,29 @@ class WalletRpcApi:
         request["puzzle_hash"] = puzzle_hash
         await wallet.rl_add_funds(request["amount"], puzzle_hash, request["fee"])
         return {"status": "SUCCESS"}
+
+    async def get_farmed_amount(self, request):
+        tx_records: List[TransactionRecord] = await self.service.wallet_state_manager.tx_store.get_farming_rewards()
+        amount = 0
+        pool_reward_amount = 0
+        farmer_reward_amount = 0
+        fee_amount = 0
+        last_height_farmed = 0
+        for record in tx_records:
+            height = record.height_farmed()
+            if height > last_height_farmed:
+                last_height_farmed = height
+            if record.type == TransactionType.COINBASE_REWARD:
+                pool_reward_amount += record.amount
+            if record.type == TransactionType.FEE_REWARD:
+                fee_amount += record.amount - calculate_base_farmer_reward(height)
+                farmer_reward_amount += record.amount - fee_amount
+            amount += record.amount
+
+        return {
+            "farmed_amount": amount,
+            "pool_reward_amount": pool_reward_amount,
+            "farmer_reward_amount": farmer_reward_amount,
+            "fee_amount": fee_amount,
+            "last_height_farmed": last_height_farmed,
+        }

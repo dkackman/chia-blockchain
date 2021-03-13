@@ -1,5 +1,7 @@
+import datetime
+import pathlib
 from pathlib import Path
-from typing import Tuple, Any
+from typing import Any, Tuple
 
 import pkg_resources
 from cryptography import x509
@@ -8,13 +10,17 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.x509.oid import NameOID
-import datetime
 
 
 def get_chia_ca_crt_key() -> Tuple[Any, Any]:
     crt = pkg_resources.resource_string(__name__, "chia_ca.crt")
     key = pkg_resources.resource_string(__name__, "chia_ca.key")
     return crt, key
+
+
+def get_mozzila_ca_crt() -> str:
+    mozilla_path = pathlib.Path(__file__).parent.parent.parent.absolute() / "mozilla-ca/cacert.pem"
+    return str(mozilla_path)
 
 
 def generate_ca_signed_cert(ca_crt: bytes, ca_key: bytes, cert_out: Path, key_out: Path):

@@ -5,10 +5,12 @@ $ErrorActionPreference = "Stop"
 mkdir build_scripts\win_build
 Set-Location -Path ".\build_scripts\win_build" -PassThru
 
+git status
+
 Write-Output "   ---"
 Write-Output "curl miniupnpc"
 Write-Output "   ---"
-Invoke-WebRequest -Uri "https://download.chia.net/simple/miniupnpc/miniupnpc-2.1-cp37-cp37m-win_amd64.whl" -OutFile "miniupnpc-2.1-cp37-cp37m-win_amd64.whl"
+Invoke-WebRequest -Uri "https://pypi.chia.net/simple/miniupnpc/miniupnpc-2.1-cp37-cp37m-win_amd64.whl" -OutFile "miniupnpc-2.1-cp37-cp37m-win_amd64.whl"
 Write-Output "Using win_amd64 python 3.7 wheel from https://github.com/miniupnp/miniupnp/pull/475 (2.2.0-RC1)"
 If ($LastExitCode -gt 0){
     Throw "Failed to download miniupnpc!"
@@ -41,13 +43,12 @@ if (-not (Test-Path env:CHIA_INSTALLER_VERSION)) {
   Write-Output "WARNING: No environment variable CHIA_INSTALLER_VERSION set. Using 0.0.0"
   }
 Write-Output "Chia Version is: $env:CHIA_INSTALLER_VERSION"
-Write-Output "SCM Version is: $env:SCM_VERSION"
 Write-Output "   ---"
 
 Write-Output "   ---"
 Write-Output "Build chia-blockchain wheels"
 Write-Output "   ---"
-pip wheel --use-pep517 --extra-index-url https://download.chia.net/simple/ -f . --wheel-dir=.\build_scripts\win_build .
+pip wheel --use-pep517 --extra-index-url https://pypi.chia.net/simple/ -f . --wheel-dir=.\build_scripts\win_build .
 
 Write-Output "   ---"
 Write-Output "Install chia-blockchain wheels into venv with pip"
@@ -73,15 +74,19 @@ Write-Output "   ---"
 Copy-Item "dist\daemon" -Destination "..\chia-blockchain-gui\" -Recurse
 Set-Location -Path "..\chia-blockchain-gui" -PassThru
 
+git status
+
 Write-Output "   ---"
 Write-Output "Prepare Electron packager"
 Write-Output "   ---"
 npm install --save-dev electron-winstaller
 npm install -g electron-packager
 npm install
+npm audit fix
 npm run locale:extract
 npm run locale:compile
 
+git status
 
 Write-Output "   ---"
 Write-Output "Electron package Windows Installer"
@@ -112,6 +117,8 @@ Write-Output "node winstaller.js"
 node winstaller.js
 Write-Output "   ---"
 
+git status
+
 If ($env:HAS_SECRET) {
    Write-Output "   ---"
    Write-Output "Add timestamp and verify signature"
@@ -121,6 +128,8 @@ If ($env:HAS_SECRET) {
    }   Else    {
    Write-Output "Skipping timestamp and verify signatures - no authorization to install certificates"
 }
+
+git status
 
 Write-Output "   ---"
 Write-Output "Windows Installer complete"

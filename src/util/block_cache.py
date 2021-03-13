@@ -2,11 +2,11 @@ import logging
 from typing import Dict, List, Optional
 
 from src.consensus.block_record import BlockRecord
-from src.full_node.weight_proof import BlockchainInterface
-from src.types.header_block import HeaderBlock
+from src.consensus.blockchain_interface import BlockchainInterface
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
-from src.types.weight_proof import SubEpochSegments, SubEpochChallengeSegment
+from src.types.header_block import HeaderBlock
+from src.types.weight_proof import SubEpochChallengeSegment, SubEpochSegments
 from src.util.ints import uint32
 
 
@@ -34,7 +34,7 @@ class BlockCache(BlockchainInterface):
     def block_record(self, header_hash: bytes32) -> BlockRecord:
         return self._block_records[header_hash]
 
-    def height_to_block_record(self, height: uint32, check_db=False) -> BlockRecord:
+    def height_to_block_record(self, height: uint32, check_db: bool = False) -> BlockRecord:
         header_hash = self.height_to_hash(height)
         return self.block_record(header_hash)
 

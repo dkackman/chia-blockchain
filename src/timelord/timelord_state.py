@@ -1,17 +1,16 @@
 import logging
-from typing import Optional, List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from src.consensus.constants import ConsensusConstants
 from src.protocols import timelord_protocol
 from src.timelord.iters_from_block import iters_from_block
-from src.timelord.types import StateType, Chain
+from src.timelord.types import Chain, StateType
 from src.types.blockchain_format.classgroup import ClassgroupElement
-from src.types.end_of_slot_bundle import EndOfSubSlotBundle
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.slots import ChallengeBlockInfo
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
-from src.util.ints import uint64, uint8, uint128, uint32
-
+from src.types.end_of_slot_bundle import EndOfSubSlotBundle
+from src.util.ints import uint8, uint32, uint64, uint128
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +43,9 @@ class LastState:
         self.difficulty: uint64 = constants.DIFFICULTY_STARTING
         self.sub_slot_iters: uint64 = constants.SUB_SLOT_ITERS_STARTING
         self.reward_challenge_cache: List[Tuple[bytes32, uint128]] = [(constants.GENESIS_CHALLENGE, uint128(0))]
+        self.new_epoch = False
+        self.passed_ses_height_but_not_yet_included = False
+        self.infused_ses = False
 
     def set_state(self, state: Union[timelord_protocol.NewPeakTimelord, EndOfSubSlotBundle]):
         if isinstance(state, timelord_protocol.NewPeakTimelord):
@@ -68,8 +70,12 @@ class LastState:
                 self.last_block_total_iters = self.total_iters
             self.reward_challenge_cache = state.previous_reward_challenges
             self.last_challenge_sb_or_eos_total_iters = self.peak.last_challenge_sb_or_eos_total_iters
-
-        if isinstance(state, EndOfSubSlotBundle):
+            self.new_epoch = False
+            if (self.peak.reward_chain_block.height + 1) % self.constants.SUB_EPOCH_BLOCKS == 0:
+                self.passed_ses_height_but_not_yet_included = True
+            else:
+                self.passed_ses_height_but_not_yet_included = state.passes_ses_height_but_not_yet_included
+        elif isinstance(state, EndOfSubSlotBundle):
             self.state_type = StateType.END_OF_SUB_SLOT
             if self.peak is not None:
                 self.total_iters = uint128(self.total_iters - self.get_last_ip() + self.sub_slot_iters)
@@ -83,7 +89,19 @@ class LastState:
                 assert state.challenge_chain.new_sub_slot_iters is not None
                 self.difficulty = state.challenge_chain.new_difficulty
                 self.sub_slot_iters = state.challenge_chain.new_sub_slot_iters
+                self.new_epoch = True
+            else:
+                self.new_epoch = False
+            if state.challenge_chain.subepoch_summary_hash is not None:
+                self.infused_ses = True
+                self.passed_ses_height_but_not_yet_included = False
+            else:
+                self.infused_ses = False
+                self.passed_ses_height_but_not_yet_included = self.passed_ses_height_but_not_yet_included
             self.last_challenge_sb_or_eos_total_iters = self.total_iters
+        else:
+            self.passed_ses_height_but_not_yet_included = self.passed_ses_height_but_not_yet_included
+            self.new_epoch = False
 
         self.reward_challenge_cache.append((self.get_challenge(Chain.REWARD_CHAIN), self.total_iters))
         log.info(f"Updated timelord peak to {self.get_challenge(Chain.REWARD_CHAIN)}, total iters: {self.total_iters}")
@@ -93,7 +111,10 @@ class LastState:
     def get_sub_slot_iters(self) -> uint64:
         return self.sub_slot_iters
 
-    def can_infuse_block(self) -> bool:
+    def can_infuse_block(self, overflow: bool) -> bool:
+        if overflow and self.new_epoch:
+            # No overflows in new epoch
+            return False
         if self.state_type == StateType.FIRST_SUB_SLOT or self.state_type == StateType.END_OF_SUB_SLOT:
             return True
         ss_start_iters = self.get_total_iters() - self.get_last_ip()
@@ -126,25 +147,27 @@ class LastState:
     def get_deficit(self) -> uint8:
         return self.deficit
 
-    def get_infused_sub_epoch_summary(self) -> Optional[SubEpochSummary]:
-        if self.state_type == StateType.FIRST_SUB_SLOT or self.state_type == StateType.PEAK:
-            # Only sub slots can infuse SES
-            return None
-        return self.sub_epoch_summary
+    def just_infused_sub_epoch_summary(self) -> bool:
+        """
+        Returns true if state is an end of sub-slot, and that end of sub-slot infused a sub epoch summary
+        """
+        return self.state_type == StateType.END_OF_SUB_SLOT and self.infused_ses
 
     def get_next_sub_epoch_summary(self) -> Optional[SubEpochSummary]:
         if self.state_type == StateType.FIRST_SUB_SLOT or self.state_type == StateType.END_OF_SUB_SLOT:
             # Can only infuse SES after a peak (in an end of sub slot)
             return None
         assert self.peak is not None
-        if (
-            self.peak.reward_chain_block.height + 1
-        ) % self.constants.SUB_EPOCH_BLOCKS <= self.constants.MAX_SUB_SLOT_BLOCKS and (self.get_deficit() == 0):
+        if self.passed_ses_height_but_not_yet_included and self.get_deficit() == 0:
+            # This will mean we will include the ses in the next sub-slot
             return self.sub_epoch_summary
         return None
 
     def get_last_block_total_iters(self) -> Optional[uint128]:
         return self.last_block_total_iters
+
+    def get_passed_ses_height_but_not_yet_included(self) -> bool:
+        return self.passed_ses_height_but_not_yet_included
 
     def get_challenge(self, chain: Chain) -> Optional[bytes32]:
         if self.state_type == StateType.FIRST_SUB_SLOT:

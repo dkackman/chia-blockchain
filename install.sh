@@ -8,6 +8,19 @@ if [ "$(uname)" = "Linux" ]; then
 	fi
 fi
 
+# Check for non 64 bit ARM64/Raspberry Pi installs
+if [ "$(uname -m)" = "armv7l" ]; then
+  echo ""
+	echo "WARNING:"
+	echo "Chia Blockchain requires a 64 bit OS and this is 32 bit armv7l"
+	echo "For more information:"
+	echo "https://github.com/Chia-Network/chia-blockchain/wiki/Raspberry-Pi"
+	echo "Exiting."
+	exit 1
+fi
+# get submodules
+git submodule update --init mozilla-ca
+
 UBUNTU_PRE_2004=false
 if $UBUNTU; then
 	LSB_RELEASE=$(lsb_release -rs)
@@ -29,6 +42,10 @@ if [ "$(uname)" = "Linux" ]; then
 		echo "Installing on Ubuntu/Debian 20.04 LTS or newer"
 		sudo apt-get update
 		sudo apt-get install -y python3.8-venv python3-distutils
+	elif type pacman && [ -f "/etc/arch-release" ]; then
+		# Arch Linux
+		echo "Installing on Arch Linux"
+		sudo pacman -S --needed python git
 	elif type yum && [ ! -f "/etc/redhat-release" ] && [ ! -f "/etc/centos-release" ]; then
 		# AMZN 2
 		echo "Installing on Amazon Linux 2"
@@ -83,8 +100,8 @@ pip install --upgrade pip
 pip install wheel
 #if [ "$INSTALL_PYTHON_VERSION" = "3.8" ]; then
 # This remains in case there is a diversion of binary wheels
-pip install --extra-index-url https://download.chia.net/simple/ miniupnpc==2.1
-pip install -e . --extra-index-url https://download.chia.net/simple/
+pip install --extra-index-url https://pypi.chia.net/simple/ miniupnpc==2.1
+pip install -e . --extra-index-url https://pypi.chia.net/simple/
 
 echo ""
 echo "Chia blockchain install.sh complete."
